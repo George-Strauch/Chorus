@@ -1,5 +1,7 @@
 # TODO 008 — LLM Integration
 
+> **Status:** PENDING
+
 ## Objective
 
 Implement the multi-provider LLM client supporting Anthropic and OpenAI, API key validation, model discovery, and the agentic tool use loop. This is the brain of the system — it takes a conversation, available tools, and a system prompt, sends them to the LLM, executes any tool calls the LLM makes (with permission checks), feeds results back, and loops until the LLM produces a final text response.
@@ -100,6 +102,24 @@ test_tool_loop_no_streaming_during_tool_calls
 test_tool_loop_tracks_total_token_usage
 ```
 
+## STOP — Setup Required Before Proceeding
+
+**Before planning or implementing this TODO, remind the user:**
+
+> TODO 008 is the first step that benefits from real API keys and a live Discord server. All prior TODOs (001-007) were fully testable with mocks, but from here on you'll want:
+>
+> 1. **A Discord bot token** — create a bot application at https://discord.com/developers/applications, claim it into a private server with only you (or people you'd trust at your computer unsupervised).
+> 2. **At least one LLM API key** — Anthropic (`ANTHROPIC_API_KEY`) and/or OpenAI (`OPENAI_API_KEY`).
+> 3. **A `.env` file** — copy `.env.example` and fill in the credentials.
+>
+> The tests for this TODO still use mocks (no real API calls), but you'll want the live setup ready for manual testing and for TODO 009+ where the bot actually responds in Discord.
+>
+> **Do you have these set up, or do you need help with any of them?**
+
+Wait for the user's answer before continuing with the planning session.
+
+---
+
 ## Implementation Notes
 
 1. **Module locations:**
@@ -194,7 +214,7 @@ test_tool_loop_tracks_total_token_usage
        return ToolLoopResult(content="Max iterations reached", ...)
    ```
 
-7. **Ask callback for Discord:** The `ask_callback` is provided by the Discord layer. It posts an embed with the tool name and arguments, adds approve/reject buttons, and awaits the user's response with a timeout.
+7. **Ask callback for Discord:** The `ask_callback` is `ask_user_permission()` from `chorus.permissions.ask_ui` (implemented in TODO 003). It posts an embed with the action string, tool name, and arguments, shows Allow/Deny buttons locked to the requesting user, and suspends via `view.wait()` until the user responds or it times out. See TODO 003 for the full `PermissionAskView` implementation.
 
 8. **Key validation:** For Anthropic, send a minimal `messages.create` with a tiny prompt and `max_tokens=1`. For OpenAI, call `models.list()`. Catch `AuthenticationError` to detect invalid keys.
 
@@ -217,6 +237,16 @@ test_tool_loop_tracks_total_token_usage
 
 10. **Testing:** Mock both SDK clients entirely. Use `unittest.mock.AsyncMock` to mock `anthropic.AsyncAnthropic` and `openai.AsyncOpenAI`. The tool loop tests should use a fake provider that returns scripted responses. Never make real API calls in tests.
 
+## Thread-Awareness (TODO 006 interaction)
+
+The tool loop function is called per-thread, not per-agent. Each invocation receives:
+- The thread's own `messages` list
+- A `thread_id` for file locking coordination
+- Access to the `ThreadManager` for status injection and file lock acquisition
+
+File-writing tools (`create_file`, `str_replace`, bash commands that write files) must acquire file locks through the thread manager before execution.
+
 ## Dependencies
 
 - **003-permission-profiles**: Permission checks within the tool loop.
+- **006-execution-threads**: Tool loop runs inside an execution thread, needs file locking.

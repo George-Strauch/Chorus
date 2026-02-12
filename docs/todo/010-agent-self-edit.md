@@ -1,5 +1,7 @@
 # TODO 010 — Agent Self-Edit
 
+> **Status:** PENDING
+
 ## Objective
 
 Implement the agent's ability to edit its own configuration: system prompt, docs, permission profile, and model. Self-editing is a first-class capability — agents should be able to evolve their own behavior as they work. All self-edits are gated by the invoking user's Discord role and logged to the audit table.

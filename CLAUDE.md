@@ -236,19 +236,25 @@ Matching order: allow → ask → DENY
 /context clear
 /context history [agent_name]
 /context restore <session_id>
-/tasks                          # View agent's running programs
-/status                         # Agent status including running tasks
+/thread list                     # Show active threads with metrics (step, elapsed, status)
+/thread kill <id>               # Cancel a running execution thread
+/thread kill all                # Cancel all threads for this agent
+/thread history <id>            # Full step history for a thread (timing, actions)
+/status                         # Agent overview: threads, processes, metrics
 ```
 
 ### Multi-Provider LLM Support
 
 Supports Anthropic and OpenAI. Keys validated on startup, available models discovered and cached in `~/.chorus-agents/available_models.json`. Providers implement a unified `LLMProvider` protocol so the tool loop is provider-agnostic.
 
-### Context Management & Idle Timer
+### Context Management — Rolling Window
 
-- Idle timeout (default 30min) triggers: NL summary → save session → clear context → notify channel
-- Manual save/restore via `/context save` and `/context restore`
-- Sessions stored in agent's `sessions/` directory + metadata in SQLite
+- All messages persisted to SQLite. Context = messages since `max(last_clear_time, now - rolling_window)`.
+- Default rolling window: 24 hours. Configurable per-agent via `/settings`.
+- `/context clear` advances `last_clear_time` — everything after it is included, everything before excluded.
+- `/context save` snapshots the window to a session file with LLM-generated summary. Does not clear.
+- Context survives bot restarts (rebuilt from SQLite).
+- Each LLM call receives: system prompt + agent docs + thread/process status + rolling window messages.
 
 ---
 
@@ -270,9 +276,10 @@ Supports Anthropic and OpenAI. Keys validated on startup, available models disco
 Follow `docs/todo/` in numerical order. Each TODO: objective, acceptance criteria, tests-first, implementation notes, dependencies.
 
 **Phase 1 — Foundation (001-003):** Bot skeleton, agent manager, permission engine
-**Phase 2 — Agent Tools (004-006):** File ops, bash execution, git integration
-**Phase 3 — Intelligence (007-010):** Context management, LLM integration, defaults, self-edit
+**Phase 2 — Agent Tools (004-005):** File ops, bash execution (git goes through bash, no separate module)
+**Phase 3 — Concurrency & Intelligence (006-010):** Execution threads, context management, LLM integration, defaults, self-edit
 **Phase 4 — Future (011-013):** Voice, webhooks, inter-agent communication
+**Backlog (014-015):** Long-running process management, process hooks
 
 ---
 

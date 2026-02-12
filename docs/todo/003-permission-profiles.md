@@ -1,5 +1,7 @@
 # TODO 003 — Permission Profiles
 
+> **Status:** PENDING
+
 ## Objective
 
 Implement the regex-based allow/ask permission engine. Every tool invocation is represented as an action string (`tool:<tool_name>:<detail>`). The engine matches the action against the agent's permission profile to decide: allow (proceed automatically), ask (prompt the user for confirmation in Discord), or deny (block silently with a logged reason). This module is pure logic with zero Discord or filesystem dependencies.
@@ -120,6 +122,93 @@ test_profile_deserialization_from_dict
 
 7. **Testing approach:** This module is ideal for pure unit tests. No mocking needed, no async, no fixtures beyond simple data construction. Parameterize heavily with `@pytest.mark.parametrize`.
 
+---
+
+## Discord Ask UI — `PermissionAskView`
+
+The `ASK` result from the permission engine must have a clean, reliable Discord UI for prompting the user. This is a first-class component, not an afterthought — it is the primary way the user stays in control of what agents do.
+
+**Location:** `src/chorus/permissions/ask_ui.py`
+
+**Design:** A `discord.ui.View` with Allow/Deny buttons and `view.wait()` to suspend the tool loop coroutine without blocking the event loop. The view must:
+
+1. Show the action string and human-readable context (tool name, arguments) in an embed.
+2. Lock buttons to the user who triggered the agent via `interaction_check` — other server members cannot approve/deny.
+3. Time out after a configurable duration (default 120s). Timeout = deny.
+4. Disable buttons after a decision or timeout so stale prompts don't look interactive.
+
+```python
+class PermissionAskView(discord.ui.View):
+    def __init__(self, requester_id: int, timeout: float = 120):
+        super().__init__(timeout=timeout)
+        self.requester_id = requester_id
+        self.value: bool | None = None  # None = timed out
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        """Only the user who triggered the agent can respond."""
+        return interaction.user.id == self.requester_id
+
+    @discord.ui.button(label="Allow", style=discord.ButtonStyle.green)
+    async def allow(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message("Approved.", ephemeral=True)
+        self.value = True
+        self.stop()
+
+    @discord.ui.button(label="Deny", style=discord.ButtonStyle.red)
+    async def deny(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message("Denied.", ephemeral=True)
+        self.value = False
+        self.stop()
+
+    async def on_timeout(self) -> None:
+        """Disable buttons when the view times out."""
+        for child in self.children:
+            child.disabled = True  # type: ignore[union-attr]
+```
+
+**The ask callback** passed to the tool loop:
+
+```python
+async def ask_user_permission(
+    channel: discord.TextChannel,
+    requester_id: int,
+    action_string: str,
+    tool_name: str,
+    arguments: str,
+) -> bool:
+    embed = discord.Embed(
+        title="Permission Required",
+        description=f"`{action_string}`",
+        color=discord.Color.yellow(),
+    )
+    embed.add_field(name="Tool", value=tool_name, inline=True)
+    embed.add_field(name="Arguments", value=f"```\n{arguments}\n```", inline=False)
+
+    view = PermissionAskView(requester_id=requester_id, timeout=120)
+    msg = await channel.send(embed=embed, view=view)
+
+    timed_out = await view.wait()
+
+    # Disable buttons on the message after resolution
+    for child in view.children:
+        child.disabled = True  # type: ignore[union-attr]
+    await msg.edit(view=view)
+
+    if timed_out or view.value is None:
+        return False
+    return view.value
+```
+
+**Tests** (add to `tests/test_permissions/test_engine.py` or a new `tests/test_permissions/test_ask_ui.py`):
+```
+test_ask_view_allow_sets_value_true
+test_ask_view_deny_sets_value_false
+test_ask_view_timeout_leaves_value_none
+test_ask_view_interaction_check_rejects_wrong_user
+test_ask_view_interaction_check_allows_requester
+test_ask_view_disables_buttons_on_timeout
+```
+
 ## Dependencies
 
-None. This is pure logic — no other Chorus modules required.
+None. The permission engine is pure logic. The ask UI depends only on `discord.py` and is kept in a separate file from the engine so the engine remains dependency-free.

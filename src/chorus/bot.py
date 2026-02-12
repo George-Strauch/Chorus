@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import pkgutil
+from pathlib import Path
 
 import discord
 from discord import app_commands
@@ -11,7 +12,10 @@ from discord.ext import commands
 from dotenv import load_dotenv
 
 import chorus.commands
+from chorus.agent.directory import AgentDirectory
+from chorus.agent.manager import AgentManager
 from chorus.config import BotConfig
+from chorus.storage.db import Database
 
 logger = logging.getLogger("chorus.bot")
 
@@ -35,7 +39,17 @@ class ChorusBot(commands.Bot):
         )
 
     async def setup_hook(self) -> None:
-        """Load cogs and register error handler."""
+        """Initialize storage, agent manager, load cogs, and register error handler."""
+        # Initialize database
+        self.db = Database(self.config.chorus_home / "db" / "chorus.db")
+        await self.db.init()
+
+        # Initialize agent manager
+        template_dir = Path(__file__).resolve().parent.parent.parent / "template"
+        directory = AgentDirectory(self.config.chorus_home, template_dir)
+        directory.ensure_home()
+        self.agent_manager = AgentManager(directory, self.db)
+
         # Auto-discover and load all command cogs
         for module_info in pkgutil.iter_modules(chorus.commands.__path__):
             ext = f"chorus.commands.{module_info.name}"
@@ -65,6 +79,12 @@ class ChorusBot(commands.Bot):
                 await interaction.response.send_message(msg, ephemeral=True)
             else:
                 await interaction.followup.send(msg, ephemeral=True)
+
+    async def close(self) -> None:
+        """Shut down database and disconnect."""
+        if hasattr(self, "db"):
+            await self.db.close()
+        await super().close()
 
     async def on_ready(self) -> None:
         """Log startup info and sync command tree."""

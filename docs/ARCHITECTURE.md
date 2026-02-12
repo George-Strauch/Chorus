@@ -61,7 +61,7 @@ Discord Server
 | **Tool Registry** | `tools/registry.py` | Registers all tools, filters available tools per agent based on permissions |
 | **File Ops** | `tools/file_ops.py` | `create_file`, `str_replace`, `view` -- all jailed to agent workspace |
 | **Bash** | `tools/bash.py` | Sandboxed command execution with cwd set to agent workspace |
-| **Git** | `tools/git.py` | Git init, commit, push, branch, merge request creation |
+| **Execution Threads** | `agent/threads.py` | Concurrent execution threads per agent, reply-based routing, file locking |
 | **LLM Providers** | `llm/providers.py` | Unified `LLMProvider` protocol, Anthropic and OpenAI implementations |
 | **Model Discovery** | `llm/discovery.py` | Validate API keys on startup, discover and cache available models |
 | **Tool Loop** | `llm/tool_loop.py` | Agentic loop: message -> LLM -> tool_use -> execute -> result -> LLM -> ... |
@@ -76,7 +76,7 @@ Discord Server
 
 ### User Message to Agent Response
 
-The primary data flow is a user sending a message in a Discord channel that is bound to an agent. The message flows through the system as follows:
+The primary data flow is a user sending a message in a Discord channel that is bound to an agent. Messages are routed to execution threads based on whether they are replies.
 
 ```
 1. User types message in #frontend-agent channel
@@ -86,15 +86,19 @@ The primary data flow is a user sending a message in a Discord channel that is b
 3. bot.py looks up which agent owns channel_id
    (AgentManager.get_agent_by_channel)
                     |
-4. Agent's context is loaded/resumed
-   - If active session exists: append message to context
-   - If no session: start new session, load agent.json config,
-     inject system prompt + docs/ contents as context prefix
+4. Message routing (ThreadManager):
+   - If message is a reply to a bot message → route to the thread
+     that produced that bot message
+   - If message is not a reply → create a new execution thread
                     |
-5. Context (system prompt + docs + conversation history + new message)
-   is sent to tool_loop.py
+5. Thread's context is prepared:
+   - System prompt + docs/ contents
+   - Summary of other active threads and running processes
+   - This thread's conversation history
+   - The new user message
                     |
-6. tool_loop.py calls LLM provider with context + available tools
+6. Thread's tool loop runs (as an asyncio.Task):
+   tool_loop.py calls LLM provider with context + available tools
                     |
 7. LLM returns one of:
    a) text response         -> send to Discord channel, done
@@ -105,18 +109,21 @@ The primary data flow is a user sending a message in a Discord channel that is b
    b) Check PermissionEngine:
       - ALLOW  -> execute immediately
       - ASK    -> post confirmation prompt in Discord, wait for user
+                  (thread status = waiting_for_permission, other threads continue)
       - DENY   -> return denial message to LLM
-   c) Execute tool, capture result
-   d) Append tool_result to context
+   c) For file writes: acquire file lock (other threads wait or get error)
+   d) Execute tool, capture result, release lock
+   e) Append tool_result to context
                     |
 9. Send updated context (now including tool results) back to LLM
    -> Go to step 7 (loop until LLM returns text response with no tool_use)
                     |
-10. Final text response is sent to Discord channel
+10. Final text response is sent to Discord channel (via rate-limited queue)
+    Bot message is tagged with thread ID for future reply routing
                     |
-11. Context manager updates idle timer
-    - Reset timeout to 30 minutes
-    - On timeout: generate NL summary, save session, clear context, notify channel
+11. Thread status set to completed
+    Context manager updates idle timer (resets for the whole agent)
+    - On timeout: summarize all threads, save session, clear context, notify channel
 ```
 
 ### Slash Command Flow
@@ -175,12 +182,13 @@ Manages the filesystem layout under `~/.chorus-agents/`. Handles:
 
 ### Context Manager (`agent/context.py`)
 
-Manages the conversation context for each active agent session:
-- Maintains the message history (system prompt + docs + user messages + assistant responses + tool calls/results)
-- Idle timer: resets on each interaction, fires after configurable timeout (default 30 minutes)
-- On idle timeout: calls LLM to generate a natural-language summary of the session, saves it to `sessions/` directory as JSON, clears in-memory context, posts notification in Discord channel
-- Manual save/restore via `/context save` and `/context restore`
-- Context history listing via `/context history`
+Manages conversation context via a **rolling window** of persisted messages:
+- All messages (user, assistant, tool_use, tool_result) are persisted to SQLite with timestamps. Context survives bot restarts.
+- **Rolling window:** context = messages since `max(last_clear_time, now - rolling_window)`. Default window is 24 hours.
+- `/context clear` advances the `last_clear_time` marker. Messages before this point are excluded from active context but remain in the database for history.
+- `/context save [description]` snapshots the current window to a session JSON file with an LLM-generated summary. Does not clear.
+- `/context restore <session_id>` loads a saved snapshot back into the context.
+- Context assembly for each LLM call: system prompt + agent docs + thread/process status + rolling window messages for the current thread.
 
 ### Self-Edit (`agent/self_edit.py`)
 
@@ -223,14 +231,24 @@ All paths are resolved relative to the agent's `workspace/` directory. Path trav
 - Configurable timeout (default from bot config)
 - No chroot or namespace isolation -- Docker is the outer security boundary
 
-**Git (`tools/git.py`):**
-- `git_init()` -- initialize repo (done automatically on agent creation)
-- `git_commit(message)` -- stage all changes and commit
-- `git_push(remote, branch)` -- push to remote
-- `git_branch(name)` -- create and switch branch
-- `git_merge_request(title, description, target_branch)` -- create MR via git push options or API
+### Execution Threads (`agent/threads.py`)
 
-All git operations run in the agent's `workspace/` directory.
+Agents support **concurrent execution threads**. Each thread is an independent LLM tool loop with its own conversation context, running as an `asyncio.Task`. Multiple threads share the agent's workspace.
+
+**Message routing — reply-based:**
+- A new (non-reply) message in the agent channel starts a new execution thread.
+- A reply to a bot message routes the user's message into the thread that produced it.
+- This uses Discord's native reply feature (`message.reference.message_id`).
+
+**File locking:**
+- Threads share a workspace. Concurrent writes to the same file would corrupt it.
+- File tools acquire a per-file `asyncio.Lock` before writing. Reads do not lock.
+- If a lock cannot be acquired within a timeout (default 30s), the tool returns an error to the LLM so it can retry or work on something else.
+
+**Context awareness:**
+- Each thread's system prompt includes a summary of other active threads so the LLM can avoid conflicts and coordinate.
+
+**Thread lifecycle:** created on message → running tool loop → completed on final response or killed via `/thread kill`.
 
 ### LLM Providers (`llm/providers.py`)
 
@@ -377,6 +395,35 @@ CREATE TABLE audit_log (
     detail TEXT                   -- Additional context (tool params, error messages)
 );
 
+-- Persisted messages for rolling context window
+CREATE TABLE messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_name TEXT NOT NULL,
+    thread_id INTEGER,
+    role TEXT NOT NULL,
+    content TEXT,
+    tool_calls TEXT,
+    tool_call_id TEXT,
+    timestamp TEXT NOT NULL,
+    discord_message_id INTEGER
+);
+
+CREATE INDEX idx_messages_agent_time ON messages(agent_name, timestamp);
+
+-- Execution thread step history (metrics/tracing)
+CREATE TABLE thread_steps (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_name TEXT NOT NULL,
+    thread_id INTEGER NOT NULL,
+    step_number INTEGER NOT NULL,
+    description TEXT NOT NULL,
+    started_at TEXT NOT NULL,
+    ended_at TEXT,
+    duration_ms INTEGER
+);
+
+CREATE INDEX idx_thread_steps_agent_thread ON thread_steps(agent_name, thread_id);
+
 -- Server-wide default settings
 CREATE TABLE settings (
     guild_id INTEGER NOT NULL,
@@ -440,6 +487,43 @@ class Message:
 ```
 
 Each provider implementation translates to/from this common format. The Anthropic provider maps to/from Anthropic's `content_block` format. The OpenAI provider maps to/from OpenAI's `function_call`/`tool_calls` format.
+
+---
+
+## Discord API Limitations
+
+These constraints affect the design of concurrent execution and must be handled explicitly:
+
+- **Rate limits:** 5 messages per 5 seconds per channel. Multiple threads posting output simultaneously will collide. All outgoing messages must go through a per-channel queue with rate limiting.
+- **Message length:** 2000 characters. Long LLM responses or tool outputs need truncation, splitting, or file attachments.
+- **Interaction timeout:** Slash commands must respond within 3 seconds (can defer for longer work).
+- **Embed limits:** 6000 characters total per embed. Status displays must be concise.
+- **No persistent UI widgets:** There is no way to keep a live dashboard at the bottom of a channel. Use `/thread list` and `/status` on demand.
+- **Reply chains:** Discord's reply feature (`message.reference`) provides free routing metadata. This is the basis of the reply-based thread routing model.
+
+---
+
+## Concurrency Model
+
+### Execution Threads
+
+An agent can run multiple execution threads simultaneously. Each thread is an `asyncio.Task` running an independent tool loop. Threads share the agent's workspace and permission profile but have independent conversation contexts.
+
+```
+User sends "refactor auth"              → Thread #1 created, starts tool loop
+User sends "write tests for users"      → Thread #2 created, starts tool loop
+User replies to Thread #1's message:
+  "include error handling too"           → Injected into Thread #1's context
+/thread kill 2                          → Thread #2 cancelled
+```
+
+### Future: Long-Running Processes (Backlog)
+
+Distinct from execution threads, agents will eventually track OS-level subprocesses that outlive the tool loop (database migrations, build jobs, servers). These are tracked by PID with output captured to log files. See TODO 014.
+
+### Future: Process Hooks (Backlog)
+
+Tracked processes will be able to spawn execution threads on events (exit, output match, timeout). Hook definitions carry context so the spawned thread understands why the process exists and what to do. See TODO 015.
 
 ---
 

@@ -1,5 +1,7 @@
 # TODO 001 — Core Bot Skeleton
 
+> **Status:** COMPLETED
+
 ## Objective
 
 Stand up the Discord bot foundation: connect to Discord with `discord.py`, register the slash command tree via `app_commands`, implement cog-based command loading, and wire up essential event handlers (`on_ready`, `on_message`, error handling). After this TODO, the bot starts, connects to Discord, loads cogs dynamically, and responds to a `/ping` health-check command.

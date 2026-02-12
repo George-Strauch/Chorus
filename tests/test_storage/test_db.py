@@ -1,10 +1,24 @@
 """Tests for chorus.storage.db — SQLite storage layer."""
 
-from pathlib import Path
+from __future__ import annotations
+
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
 import pytest
 
+if TYPE_CHECKING:
+    from pathlib import Path
+
 from chorus.storage.db import Database
+
+
+@pytest.fixture
+async def db(tmp_path: Path) -> Database:
+    db_path = tmp_path / "db" / "chorus.db"
+    database = Database(db_path)
+    await database.init()
+    return database
 
 
 class TestDatabaseInit:
@@ -40,14 +54,59 @@ class TestDatabaseInit:
 
 
 class TestAgentStorage:
-    def test_register_agent(self) -> None:
-        pytest.skip("Not implemented yet — TODO 002")
+    async def test_register_agent(self, db: Database) -> None:
+        now = datetime.now(UTC).isoformat()
+        await db.register_agent(
+            name="test-bot",
+            channel_id=12345,
+            guild_id=99999,
+            model="gpt-4o",
+            permissions="standard",
+            created_at=now,
+        )
+        agent = await db.get_agent("test-bot")
+        assert agent is not None
+        assert agent["name"] == "test-bot"
+        assert agent["channel_id"] == 12345
+        assert agent["guild_id"] == 99999
+        assert agent["model"] == "gpt-4o"
 
-    def test_unregister_agent(self) -> None:
-        pytest.skip("Not implemented yet — TODO 002")
+    async def test_remove_agent(self, db: Database) -> None:
+        now = datetime.now(UTC).isoformat()
+        await db.register_agent(
+            name="test-bot",
+            channel_id=12345,
+            guild_id=99999,
+            model=None,
+            permissions="standard",
+            created_at=now,
+        )
+        await db.remove_agent("test-bot")
+        agent = await db.get_agent("test-bot")
+        assert agent is None
 
-    def test_list_agents(self) -> None:
-        pytest.skip("Not implemented yet — TODO 002")
+    async def test_list_agents(self, db: Database) -> None:
+        now = datetime.now(UTC).isoformat()
+        await db.register_agent("alpha", 100, 99999, None, "standard", now)
+        await db.register_agent("beta", 200, 99999, None, "standard", now)
+        agents = await db.list_agents(guild_id=99999)
+        names = sorted(a["name"] for a in agents)
+        assert names == ["alpha", "beta"]
+
+    async def test_list_agents_filters_by_guild(self, db: Database) -> None:
+        now = datetime.now(UTC).isoformat()
+        await db.register_agent("agent-a", 100, 11111, None, "standard", now)
+        await db.register_agent("agent-b", 200, 22222, None, "standard", now)
+        agents = await db.list_agents(guild_id=11111)
+        assert len(agents) == 1
+        assert agents[0]["name"] == "agent-a"
+
+    async def test_list_agents_no_guild_returns_all(self, db: Database) -> None:
+        now = datetime.now(UTC).isoformat()
+        await db.register_agent("agent-a", 100, 11111, None, "standard", now)
+        await db.register_agent("agent-b", 200, 22222, None, "standard", now)
+        agents = await db.list_agents()
+        assert len(agents) == 2
 
 
 class TestSessionStorage:

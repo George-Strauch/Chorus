@@ -1,5 +1,7 @@
 # TODO 005 — Bash Execution
 
+> **Status:** PENDING
+
 ## Objective
 
 Implement sandboxed bash command execution within an agent's workspace directory. Commands run as subprocesses with `cwd` set to the agent's `workspace/`, enforced timeout, output capture, and permission checks. This is the most security-sensitive tool — every design decision should favor safety.
@@ -150,6 +152,10 @@ safe_env              — monkeypatched environment with dummy tokens to verify 
 8. **Output truncation:** Truncate from the front (keep the tail) — the most recent output is usually more useful. Include a header: `"[Output truncated: showing last {max_output_len} chars of {total} chars]\n"`.
 
 9. **Testing:** Most tests can run real subprocesses (e.g., `echo hello`, `ls`, `exit 1`). For timeout tests, use `sleep 10` with a short timeout. For blocklist tests, verify the command is rejected before any subprocess is created.
+
+## Note on Git
+
+There is no separate git tool module. Git operations (commit, push, branch, etc.) are executed directly through bash. The permission engine can match git-specific patterns like `tool:bash:git push.*` to control access. This avoids a redundant wrapper layer — the LLM knows how to use git from the command line.
 
 ## Dependencies
 

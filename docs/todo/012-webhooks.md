@@ -1,5 +1,7 @@
 # TODO 012 — Webhooks (Future Phase)
 
+> **Status:** PENDING
+
 ## Objective
 
 Implement a webhook system that allows external services to trigger agent actions and allows agents to notify external services of events. This turns agents from passive (respond to Discord messages) into reactive participants in broader workflows — agents can respond to GitHub push events, CI/CD results, monitoring alerts, scheduled cron triggers, and more.

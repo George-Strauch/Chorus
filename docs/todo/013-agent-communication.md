@@ -1,5 +1,7 @@
 # TODO 013 — Agent Communication (Future Phase)
 
+> **Status:** PENDING
+
 ## Objective
 
 Enable inter-agent messaging: agents can send messages to other agent channels, request work from other agents, and receive responses. This transforms Chorus from a collection of independent agents into a collaborative multi-agent system where agents can delegate tasks, share information, and coordinate workflows.

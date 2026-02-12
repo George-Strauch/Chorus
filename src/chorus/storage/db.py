@@ -78,3 +78,76 @@ class Database:
         if self._conn is None:
             raise RuntimeError("Database not initialized — call init() first")
         return self._conn
+
+    async def register_agent(
+        self,
+        name: str,
+        channel_id: int,
+        guild_id: int,
+        model: str | None,
+        permissions: str,
+        created_at: str,
+    ) -> None:
+        """Insert a new agent row."""
+        await self.connection.execute(
+            "INSERT INTO agents (name, channel_id, guild_id, model, permissions, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (name, channel_id, guild_id, model, permissions, created_at),
+        )
+        await self.connection.commit()
+        logger.info("Registered agent %s (channel=%d, guild=%d)", name, channel_id, guild_id)
+
+    async def remove_agent(self, name: str) -> None:
+        """Delete an agent row by name."""
+        await self.connection.execute("DELETE FROM agents WHERE name = ?", (name,))
+        await self.connection.commit()
+        logger.info("Removed agent %s from database", name)
+
+    async def get_agent(self, name: str) -> dict[str, object] | None:
+        """Fetch a single agent by name, or None if not found."""
+        async with self.connection.execute(
+            "SELECT name, channel_id, guild_id, model, permissions, created_at, status "
+            "FROM agents WHERE name = ?",
+            (name,),
+        ) as cursor:
+            row = await cursor.fetchone()
+        if row is None:
+            return None
+        return {
+            "name": row[0],
+            "channel_id": row[1],
+            "guild_id": row[2],
+            "model": row[3],
+            "permissions": row[4],
+            "created_at": row[5],
+            "status": row[6],
+        }
+
+    async def list_agents(self, guild_id: int | None = None) -> list[dict[str, object]]:
+        """List all agents, optionally filtered by guild."""
+        if guild_id is not None:
+            query = (
+                "SELECT name, channel_id, guild_id, model, permissions, created_at, status "
+                "FROM agents WHERE guild_id = ?"
+            )
+            params: tuple[object, ...] = (guild_id,)
+        else:
+            query = (
+                "SELECT name, channel_id, guild_id, model, permissions, created_at, status "
+                "FROM agents"
+            )
+            params = ()
+        async with self.connection.execute(query, params) as cursor:
+            rows = await cursor.fetchall()
+        return [
+            {
+                "name": row[0],
+                "channel_id": row[1],
+                "guild_id": row[2],
+                "model": row[3],
+                "permissions": row[4],
+                "created_at": row[5],
+                "status": row[6],
+            }
+            for row in rows
+        ]

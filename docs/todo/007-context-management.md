@@ -1,159 +1,219 @@
 # TODO 007 — Context Management
 
+> **Status:** PENDING
+
 ## Objective
 
-Implement session save/restore, idle timer, natural language summaries, and context clearing for agents. Agents accumulate conversation history during a work session. When a session ends (manually or via idle timeout), the conversation is summarized in natural language, saved to the agent's `sessions/` directory and indexed in SQLite, and the context is cleared. Users can restore previous sessions to continue work.
+Implement the context system for agents. Context is built from a **rolling window** of persisted chat messages — by default the last 24 hours, or everything since the most recent `/context clear`, whichever is more recent. Messages are persisted to SQLite so context survives bot restarts. Each LLM call also receives a preamble with active thread status and running process summaries.
+
+## Core Context Model
+
+**Rolling window:** Every message (user, assistant, tool_use, tool_result) in an agent's channel is persisted to SQLite with a timestamp. When building context for an LLM call, we query:
+
+```sql
+SELECT * FROM messages
+WHERE agent_name = ? AND timestamp > ?
+ORDER BY timestamp ASC
+```
+
+Where `?` is `max(last_clear_time, now - rolling_window)`.
+
+- `rolling_window`: configurable per-agent, default 86400 seconds (1 day).
+- `last_clear_time`: set by `/context clear`, stored per-agent in the `agents` table or a separate setting. Default is agent creation time.
+- `/context clear` does NOT delete messages from the database — it just advances the `last_clear_time` marker. Old messages remain queryable for history but are excluded from the active context window.
+
+**Context assembly for an LLM call:**
+```
+1. System prompt (from agent.json)
+2. Agent docs/ contents
+3. Thread & process status summary (from ThreadManager / ProcessManager)
+4. Rolling window messages (for this thread's conversation)
+```
 
 ## Acceptance Criteria
 
-- `/context save [description]` saves the current session: serializes conversation messages to JSON in `~/.chorus-agents/agents/<name>/sessions/<timestamp>_<slug>.json`, generates a natural language summary via the LLM, stores metadata (timestamp, summary, description, message count, token estimate) in SQLite, and clears the in-memory context.
-- `/context clear` clears the in-memory conversation without saving.
-- `/context history [agent_name]` lists saved sessions with timestamp, description, summary, and message count. Paginated if more than 10 sessions.
-- `/context restore <session_id>` loads a saved session's messages back into the in-memory context.
-- **Idle timer:** Each agent has a configurable idle timeout (default 30 minutes). After the timeout elapses with no messages in the channel, the bot automatically triggers a save (with an auto-generated description), posts a summary message to the channel, and clears context.
-- The idle timer resets on every message in the agent's channel.
-- Session files use the naming format: `YYYY-MM-DD_<slug>.json` where slug is derived from the description or auto-generated.
-- In-memory context is stored as a list of message dicts (role, content, tool_use, tool_result) in the `Agent` runtime state — not in SQLite.
-- Context module exposes: `SessionManager` class with `save()`, `restore()`, `clear()`, `list_sessions()`, `get_summary()`.
-- Summary generation uses the agent's configured LLM provider to produce a 2-4 sentence summary of the session.
-- Old sessions are retained indefinitely (no auto-cleanup — agents may need to reference past work).
+- All messages in agent channels are persisted to SQLite with: agent_name, thread_id, role, content, tool_calls, timestamp.
+- Context for an LLM call = messages since `max(last_clear_time, now - rolling_window)` for the relevant thread.
+- `/context clear` advances the agent's `last_clear_time` to now. New threads see only messages after this point.
+- `/context save [description]` snapshots the current rolling window to a session JSON file with an LLM-generated summary. Does NOT clear context (that's what `/context clear` is for).
+- `/context history [agent_name]` lists saved session snapshots with timestamp, description, summary, and message count.
+- `/context restore <session_id>` loads a saved session's messages back into the rolling window (inserts them with current timestamps or a special marker).
+- `rolling_window` duration is configurable via `/settings` (default 1 day).
+- On bot restart, context is rebuilt from persisted messages — no data loss.
+- Old messages beyond the rolling window are retained in the database indefinitely for history queries.
 
 ## Tests to Write First
 
 File: `tests/test_agent/test_context.py`
 ```
-# Save
-test_save_session_creates_json_file
-test_save_session_stores_metadata_in_sqlite
-test_save_session_generates_summary
-test_save_session_clears_context_after_save
-test_save_session_filename_format
-test_save_session_with_custom_description
-test_save_session_empty_context_raises
+# Message persistence
+test_message_persisted_to_sqlite
+test_message_includes_agent_name_and_thread_id
+test_message_includes_timestamp
+test_messages_queryable_by_agent
 
-# Restore
-test_restore_session_loads_messages
-test_restore_session_sets_context
-test_restore_session_nonexistent_id_raises
-test_restore_session_corrupted_file_raises
+# Rolling window
+test_rolling_window_returns_messages_within_window
+test_rolling_window_excludes_old_messages
+test_rolling_window_default_is_one_day
+test_rolling_window_configurable
 
 # Clear
-test_clear_context_empties_messages
-test_clear_context_does_not_save
+test_clear_advances_last_clear_time
+test_clear_excludes_messages_before_clear_time
+test_clear_does_not_delete_messages_from_db
+test_messages_after_clear_are_included
+test_multiple_clears_use_most_recent
+
+# Context assembly
+test_context_includes_system_prompt
+test_context_includes_agent_docs
+test_context_includes_thread_status
+test_context_includes_rolling_window_messages
+test_context_window_bounded_by_clear_time_or_rolling_window
+
+# Save (snapshot)
+test_save_creates_session_json_file
+test_save_stores_metadata_in_sqlite
+test_save_generates_summary
+test_save_does_not_clear_context
+test_save_filename_format
+test_save_with_custom_description
+
+# Restore
+test_restore_loads_saved_messages
+test_restore_nonexistent_id_raises
 
 # History
-test_list_sessions_returns_all_sessions
+test_list_sessions_returns_all_snapshots
 test_list_sessions_ordered_by_timestamp_desc
-test_list_sessions_empty_returns_empty
-test_list_sessions_includes_summary
 
-# Idle timer
-test_idle_timer_triggers_after_timeout
-test_idle_timer_resets_on_message
-test_idle_timer_auto_save_creates_session
-test_idle_timer_posts_summary_to_channel
-test_idle_timer_configurable_timeout
-test_idle_timer_no_trigger_when_context_empty
+# Bot restart
+test_context_survives_restart_via_sqlite
+test_clear_time_survives_restart
 
 # Summary generation
 test_generate_summary_calls_llm
 test_generate_summary_returns_short_text
 test_generate_summary_handles_llm_failure_gracefully
-
-# Serialization
-test_session_json_roundtrip
-test_session_includes_tool_use_messages
-test_session_slug_generation_from_description
-test_session_slug_generation_auto
 ```
 
 File: `tests/test_commands/test_context_commands.py`
 ```
-test_context_save_command_calls_session_manager
-test_context_clear_command_calls_clear
+test_context_clear_command_advances_clear_time
+test_context_save_command_creates_snapshot
 test_context_history_command_returns_embed
 test_context_restore_command_loads_session
-test_context_save_command_no_active_agent_in_channel
+test_context_commands_no_active_agent_in_channel
 ```
 
 ## Implementation Notes
 
-1. **Module location:** `src/chorus/agent/context.py` for `SessionManager`, `src/chorus/commands/context_commands.py` for slash commands.
+1. **Module location:** `src/chorus/agent/context.py` for `ContextManager`, `src/chorus/commands/context_commands.py` for slash commands.
 
-2. **In-memory context storage:** The runtime `Agent` object (not the on-disk `agent.json`) holds a `messages: list[dict]` field. This list is the conversation history fed to the LLM on each call. It is never persisted to `agent.json` — it lives only in memory, and is serialized to `sessions/` on save.
+2. **New SQLite table for messages:**
+   ```sql
+   CREATE TABLE IF NOT EXISTS messages (
+       id INTEGER PRIMARY KEY AUTOINCREMENT,
+       agent_name TEXT NOT NULL,
+       thread_id INTEGER,
+       role TEXT NOT NULL,           -- "user", "assistant", "tool_use", "tool_result"
+       content TEXT,
+       tool_calls TEXT,              -- JSON-serialized tool call data, if any
+       tool_call_id TEXT,            -- For tool_result messages
+       timestamp TEXT NOT NULL,
+       discord_message_id INTEGER    -- For reply routing back to threads
+   );
 
-3. **SessionManager class:**
-   ```python
-   class SessionManager:
-       def __init__(self, agent_dir: Path, db: Database) -> None:
-           self._sessions_dir = agent_dir / "sessions"
-           self._db = db
-
-       async def save(self, messages: list[dict], description: str | None = None,
-                      summarizer: Callable | None = None) -> SessionMetadata: ...
-       async def restore(self, session_id: str) -> list[dict]: ...
-       def clear(self) -> list[dict]:  # Returns empty list for assignment
-           return []
-       async def list_sessions(self, limit: int = 50) -> list[SessionMetadata]: ...
+   CREATE INDEX IF NOT EXISTS idx_messages_agent_time
+       ON messages(agent_name, timestamp);
    ```
 
-4. **Session file format:**
+3. **Agent clear time:** Add a `last_clear_time` column to the `agents` table (or store in `settings`). Default to agent `created_at`.
+
+4. **ContextManager class:**
+   ```python
+   class ContextManager:
+       def __init__(self, agent_name: str, db: Database, rolling_window: int = 86400) -> None:
+           self._agent_name = agent_name
+           self._db = db
+           self._rolling_window = rolling_window
+
+       async def persist_message(self, thread_id: int, role: str, content: str | None,
+                                  tool_calls: list | None = None, **kwargs) -> None:
+           """Store a message in SQLite."""
+           ...
+
+       async def get_context(self, thread_id: int) -> list[dict]:
+           """Return messages within the rolling window for this thread."""
+           cutoff = max(self._last_clear_time, now - self._rolling_window)
+           ...
+
+       async def clear(self) -> None:
+           """Advance last_clear_time to now."""
+           ...
+
+       async def save_snapshot(self, description: str | None = None,
+                                summarizer: Callable | None = None) -> SessionMetadata:
+           """Save current window to a session file."""
+           ...
+
+       async def list_snapshots(self, limit: int = 50) -> list[SessionMetadata]: ...
+       async def restore_snapshot(self, session_id: str) -> None: ...
+   ```
+
+5. **Context assembly helper:**
+   ```python
+   async def build_llm_context(
+       agent: Agent,
+       thread_id: int,
+       context_manager: ContextManager,
+       thread_manager: ThreadManager,
+   ) -> list[dict]:
+       """Assemble the full context for an LLM call."""
+       messages = []
+       # 1. System prompt (handled separately by provider)
+       # 2. Agent docs
+       messages.append({"role": "user", "content": read_agent_docs(agent)})
+       # 3. Thread/process status
+       status = build_thread_status(thread_manager, thread_id)
+       if status:
+           messages.append({"role": "user", "content": status})
+       # 4. Rolling window messages for this thread
+       messages.extend(await context_manager.get_context(thread_id))
+       return messages
+   ```
+
+6. **Session snapshot file format:**
    ```json
    {
-     "session_id": "2026-02-12_auth-refactor",
+     "session_id": "uuid",
      "timestamp": "2026-02-12T14:30:00Z",
      "description": "Working on auth refactor",
      "summary": "Implemented JWT token validation and refresh flow...",
      "message_count": 47,
-     "token_estimate": 12500,
+     "window_start": "2026-02-12T00:00:00Z",
+     "window_end": "2026-02-12T14:30:00Z",
      "messages": [...]
    }
    ```
 
-5. **Slug generation:** From description: lowercase, replace spaces with hyphens, strip non-alphanumeric, truncate to 40 chars. If no description, use a 6-char hash of the first message content. If collision, append `-2`, `-3`, etc.
+7. **Summary generation:** Call the agent's configured LLM with a system prompt like: "Summarize this conversation in 2-4 sentences. Focus on what was accomplished, decisions made, and any unfinished work." If the LLM call fails, save with `summary: "(summary generation failed)"`.
 
-6. **Idle timer implementation:** Use `asyncio.Task` per agent. The task sleeps for the timeout duration. On any message in the agent's channel, cancel the current task and start a new one.
-   ```python
-   class IdleTimer:
-       def __init__(self, timeout: float, callback: Callable[[], Awaitable[None]]) -> None:
-           self._timeout = timeout
-           self._task: asyncio.Task | None = None
-           self._callback = callback
+8. **Token estimation:** Rough heuristic: `sum(len(msg.get("content", "")) for msg in messages) // 4`. Informational only.
 
-       def reset(self) -> None:
-           if self._task:
-               self._task.cancel()
-           self._task = asyncio.create_task(self._run())
+## Thread-Awareness (TODO 006 interaction)
 
-       async def _run(self) -> None:
-           await asyncio.sleep(self._timeout)
-           await self._callback()
+Context management accounts for concurrent execution threads:
 
-       def stop(self) -> None:
-           if self._task:
-               self._task.cancel()
-               self._task = None
-   ```
-
-7. **Summary generation:** Call the agent's configured LLM with a system prompt like: "Summarize this conversation in 2-4 sentences. Focus on what was accomplished, decisions made, and any unfinished work." Pass the full conversation as the user message. If the LLM call fails (network error, etc.), save the session with `summary: "(summary generation failed)"` rather than failing the entire save.
-
-8. **SQLite schema for sessions:**
-   ```sql
-   CREATE TABLE sessions (
-       session_id TEXT PRIMARY KEY,
-       agent_name TEXT NOT NULL,
-       timestamp TEXT NOT NULL,
-       description TEXT,
-       summary TEXT,
-       message_count INTEGER,
-       token_estimate INTEGER,
-       file_path TEXT NOT NULL
-   );
-   ```
-
-9. **Token estimation:** Use a rough heuristic: `sum(len(msg["content"]) for msg in messages) // 4`. This doesn't need to be exact — it's for informational display only.
+- Each message is tagged with a `thread_id` in SQLite.
+- `get_context(thread_id)` returns only messages for that thread within the rolling window.
+- Thread status (all active threads) is injected as a preamble into every LLM call so each thread knows what else is happening.
+- `/context clear` affects ALL threads — it advances the agent-level clear time.
+- `/context save` snapshots ALL threads' messages within the current window.
 
 ## Dependencies
 
 - **002-agent-manager**: Agent directory structure (sessions/ directory).
-- **008-llm-integration**: Summary generation requires the LLM client. However, the `SessionManager` accepts a `summarizer` callable, so it can be tested with a mock. The actual wiring to the LLM happens when 008 is complete.
+- **006-execution-threads**: Per-thread context, thread status injection.
+- **008-llm-integration**: Summary generation requires the LLM client. However, the `ContextManager` accepts a `summarizer` callable, so it can be tested with a mock.

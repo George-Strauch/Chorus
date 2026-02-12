@@ -1,5 +1,7 @@
 # TODO 009 — Default Settings
 
+> **Status:** PENDING
+
 ## Objective
 
 Implement server-wide default settings: default model, default permission profile, and other global configuration. These defaults apply to newly created agents unless overridden. Provide slash commands for viewing and modifying settings, validating API keys, and discovering available models.

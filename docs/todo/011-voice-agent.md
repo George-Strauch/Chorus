@@ -1,5 +1,7 @@
 # TODO 011 — Voice Agent (Future Phase)
 
+> **Status:** PENDING
+
 ## Objective
 
 Extend Chorus to support voice channel agents: agents that can join voice channels, listen to speech (via speech-to-text), respond with synthesized speech (via text-to-speech), and maintain the same tool-use capabilities as text agents. A voice agent is an agent whose primary interface is audio instead of text, but the underlying agent architecture (workspace, tools, permissions, context) remains identical.

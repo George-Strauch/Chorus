@@ -1,5 +1,7 @@
 # TODO 004 — File Tools
 
+> **Status:** PENDING
+
 ## Objective
 
 Implement the file operation tools that agents use to interact with their workspace: `create_file`, `str_replace`, and `view`. All operations are confined to the agent's `workspace/` directory with mandatory path traversal prevention. Every tool invocation runs through the permission engine before execution.

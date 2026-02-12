@@ -1,5 +1,7 @@
 # TODO 002 — Agent Manager
 
+> **Status:** COMPLETED
+
 ## Objective
 
 Implement the agent lifecycle: create new agents from `template/`, set up their directory structure under `~/.chorus-agents/agents/<name>/`, destroy agents (with optional file retention), list all agents, and update agent configuration. After this TODO, the `/agent init`, `/agent destroy`, `/agent list`, and `/agent config` slash commands work end-to-end (minus LLM and tool execution, which come later).
