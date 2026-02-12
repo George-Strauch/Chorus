@@ -129,6 +129,20 @@ def mock_bot(tmp_chorus_home: Path) -> MagicMock:
 
 
 @pytest.fixture
+def workspace_dir(tmp_agent_dir: Path) -> Path:
+    """Return the workspace directory inside the tmp agent, pre-populated with test files."""
+    ws = tmp_agent_dir / "workspace"
+    # Create a few files for testing
+    (ws / "hello.txt").write_text("Hello, world!\n", encoding="utf-8")
+    (ws / "src").mkdir()
+    (ws / "src" / "app.py").write_text(
+        "def main():\n    print('hello')\n\nif __name__ == '__main__':\n    main()\n",
+        encoding="utf-8",
+    )
+    return ws
+
+
+@pytest.fixture
 def sample_permission_profiles() -> dict[str, dict[str, list[str]]]:
     """Return the built-in permission profile presets."""
     return {
