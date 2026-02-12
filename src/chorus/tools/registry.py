@@ -39,6 +39,16 @@ def create_default_registry() -> ToolRegistry:
     """Build a registry with the built-in tools pre-registered."""
     from chorus.tools.bash import bash_execute
     from chorus.tools.file_ops import create_file, str_replace, view
+    from chorus.tools.git import (
+        git_branch,
+        git_checkout,
+        git_commit,
+        git_diff,
+        git_init,
+        git_log,
+        git_merge_request,
+        git_push,
+    )
 
     registry = ToolRegistry()
 
@@ -147,6 +157,195 @@ def create_default_registry() -> ToolRegistry:
                 "required": ["command"],
             },
             handler=bash_execute,
+        )
+    )
+
+    # -- Git tools -----------------------------------------------------------
+
+    registry.register(
+        ToolDefinition(
+            name="git_init",
+            description="Initialize a git repository in the agent workspace.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "agent_name": {
+                        "type": "string",
+                        "description": "Agent name for git user config",
+                    },
+                },
+                "required": ["agent_name"],
+            },
+            handler=git_init,
+        )
+    )
+
+    registry.register(
+        ToolDefinition(
+            name="git_commit",
+            description=(
+                "Stage files and create a git commit. "
+                "Stages all changes unless specific files are given."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "message": {
+                        "type": "string",
+                        "description": "Commit message",
+                    },
+                    "files": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Specific files to stage (default: all)",
+                    },
+                },
+                "required": ["message"],
+            },
+            handler=git_commit,
+        )
+    )
+
+    registry.register(
+        ToolDefinition(
+            name="git_push",
+            description="Push commits to a remote repository.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "remote": {
+                        "type": "string",
+                        "description": "Remote name (e.g. origin)",
+                    },
+                    "branch": {
+                        "type": "string",
+                        "description": "Branch name to push",
+                    },
+                },
+                "required": ["remote", "branch"],
+            },
+            handler=git_push,
+        )
+    )
+
+    registry.register(
+        ToolDefinition(
+            name="git_branch",
+            description="Create, list, or delete git branches.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "branch_name": {
+                        "type": "string",
+                        "description": "Branch name (omit to list all branches)",
+                    },
+                    "delete": {
+                        "type": "boolean",
+                        "description": "Delete the branch instead of creating it",
+                    },
+                },
+                "required": [],
+            },
+            handler=git_branch,
+        )
+    )
+
+    registry.register(
+        ToolDefinition(
+            name="git_checkout",
+            description="Checkout a branch, tag, or commit.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "ref": {
+                        "type": "string",
+                        "description": "Branch, tag, or commit to checkout",
+                    },
+                    "create": {
+                        "type": "boolean",
+                        "description": "Create a new branch (git checkout -b)",
+                    },
+                },
+                "required": ["ref"],
+            },
+            handler=git_checkout,
+        )
+    )
+
+    registry.register(
+        ToolDefinition(
+            name="git_diff",
+            description="Show git diff — working tree vs HEAD, or between two refs.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "ref1": {
+                        "type": "string",
+                        "description": "First ref (optional)",
+                    },
+                    "ref2": {
+                        "type": "string",
+                        "description": "Second ref (optional)",
+                    },
+                },
+                "required": [],
+            },
+            handler=git_diff,
+        )
+    )
+
+    registry.register(
+        ToolDefinition(
+            name="git_log",
+            description="Show git commit log.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "count": {
+                        "type": "integer",
+                        "description": "Number of commits to show (default: 20)",
+                    },
+                    "oneline": {
+                        "type": "boolean",
+                        "description": "Use one-line format",
+                    },
+                },
+                "required": [],
+            },
+            handler=git_log,
+        )
+    )
+
+    registry.register(
+        ToolDefinition(
+            name="git_merge_request",
+            description=(
+                "Create a merge/pull request on GitHub or GitLab. "
+                "Detects the forge from the origin remote URL."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "title": {
+                        "type": "string",
+                        "description": "PR/MR title",
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "PR/MR description",
+                    },
+                    "source_branch": {
+                        "type": "string",
+                        "description": "Source (head) branch",
+                    },
+                    "target_branch": {
+                        "type": "string",
+                        "description": "Target (base) branch",
+                    },
+                },
+                "required": ["title", "description", "source_branch", "target_branch"],
+            },
+            handler=git_merge_request,
         )
     )
 

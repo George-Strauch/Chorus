@@ -97,3 +97,31 @@ class TestRegistryContainsFileTools:
         assert tool is not None
         assert tool.name == "bash"
         assert "command" in tool.parameters["properties"]
+
+
+class TestRegistryContainsGitTools:
+    def test_all_git_tools_registered(self) -> None:
+        from chorus.tools.registry import create_default_registry
+
+        registry = create_default_registry()
+        expected = [
+            "git_init",
+            "git_commit",
+            "git_push",
+            "git_branch",
+            "git_checkout",
+            "git_diff",
+            "git_log",
+            "git_merge_request",
+        ]
+        for name in expected:
+            tool = registry.get(name)
+            assert tool is not None, f"Tool {name!r} not registered"
+            assert tool.name == name
+
+    def test_git_tool_count(self) -> None:
+        from chorus.tools.registry import create_default_registry
+
+        registry = create_default_registry()
+        git_tools = [t for t in registry.list_all() if t.name.startswith("git_")]
+        assert len(git_tools) == 8

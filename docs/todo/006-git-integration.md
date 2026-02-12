@@ -1,5 +1,7 @@
 # TODO 006 — Git Integration
 
+> **Status:** COMPLETED
+
 ## Objective
 
 Implement Git operations as agent tools: init, commit, push, branch, checkout, diff, log, and merge_request. All operations execute within the agent's `workspace/` directory. Push and merge_request require explicit permission (via the ask flow for the `standard` profile). Git operations use the bash execution layer from TODO 005 rather than a Python git library — this keeps the implementation simple and gives agents the full power of the git CLI.

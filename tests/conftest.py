@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock
@@ -148,6 +149,61 @@ def safe_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DISCORD_TOKEN", "dummy-discord-token-for-testing")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-dummy-key")
     monkeypatch.setenv("OPENAI_API_KEY", "sk-openai-dummy-key")
+
+
+@pytest.fixture
+def git_workspace(tmp_path: Path) -> Path:
+    """Create a temporary workspace with an initialized git repo and initial commit."""
+    ws = tmp_path / "git-workspace"
+    ws.mkdir()
+
+    import subprocess
+
+    env = {"HOME": str(tmp_path), "PATH": os.environ.get("PATH", "")}
+    run = lambda cmd: subprocess.run(  # noqa: E731
+        cmd, cwd=ws, env=env, capture_output=True, text=True, check=True
+    )
+
+    run(["git", "init", "-b", "main"])
+    run(["git", "config", "user.name", "test-agent"])
+    run(["git", "config", "user.email", "test-agent@chorus.local"])
+    (ws / "README.md").write_text("# Test Repo\n")
+    run(["git", "add", "README.md"])
+    run(["git", "commit", "-m", "Initial commit"])
+    return ws
+
+
+@pytest.fixture
+def git_workspace_with_remote(tmp_path: Path) -> tuple[Path, Path]:
+    """Workspace with a bare repo added as origin, initial push done.
+
+    Returns (workspace, bare_remote).
+    """
+    import subprocess
+
+    bare = tmp_path / "remote.git"
+    bare.mkdir()
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+
+    env = {"HOME": str(tmp_path), "PATH": os.environ.get("PATH", "")}
+    run_in = lambda cwd, cmd: subprocess.run(  # noqa: E731
+        cmd, cwd=cwd, env=env, capture_output=True, text=True, check=True
+    )
+
+    # Init bare remote
+    run_in(bare, ["git", "init", "--bare", "-b", "main"])
+
+    # Init workspace
+    run_in(ws, ["git", "init", "-b", "main"])
+    run_in(ws, ["git", "config", "user.name", "test-agent"])
+    run_in(ws, ["git", "config", "user.email", "test-agent@chorus.local"])
+    (ws / "README.md").write_text("# Test Repo\n")
+    run_in(ws, ["git", "add", "README.md"])
+    run_in(ws, ["git", "commit", "-m", "Initial commit"])
+    run_in(ws, ["git", "remote", "add", "origin", str(bare)])
+    run_in(ws, ["git", "push", "-u", "origin", "main"])
+    return ws, bare
 
 
 @pytest.fixture
