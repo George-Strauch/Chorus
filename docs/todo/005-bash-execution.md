@@ -1,6 +1,6 @@
 # TODO 005 — Bash Execution
 
-> **Status:** PENDING
+> **Status:** COMPLETED
 
 ## Objective
 

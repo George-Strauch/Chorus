@@ -88,3 +88,12 @@ class TestRegistryContainsFileTools:
         assert registry.get("create_file") is not None
         assert registry.get("str_replace") is not None
         assert registry.get("view") is not None
+
+    def test_bash_tool_registered(self) -> None:
+        from chorus.tools.registry import create_default_registry
+
+        registry = create_default_registry()
+        tool = registry.get("bash")
+        assert tool is not None
+        assert tool.name == "bash"
+        assert "command" in tool.parameters["properties"]
