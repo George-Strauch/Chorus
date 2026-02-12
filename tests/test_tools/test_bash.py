@@ -120,7 +120,9 @@ class TestTimeout:
     @pytest.mark.asyncio
     async def test_bash_execute_sigterm_then_sigkill(self, workspace_dir: Path) -> None:
         # trap '' TERM ignores SIGTERM, forcing escalation to SIGKILL
-        result = await bash_execute("trap '' TERM; sleep 30", workspace_dir, ALLOW_ALL, timeout=0.5)
+        result = await bash_execute(
+            "trap '' TERM; sleep 30", workspace_dir, ALLOW_ALL, timeout=0.5, sigterm_grace=1.0
+        )
         assert result.timed_out is True
 
 

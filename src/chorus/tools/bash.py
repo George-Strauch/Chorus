@@ -189,7 +189,7 @@ def get_process_tracker() -> ProcessTracker:
 # Core execution
 # ---------------------------------------------------------------------------
 
-_SIGTERM_GRACE_SECONDS = 2.0
+_DEFAULT_SIGTERM_GRACE_SECONDS = 5.0
 
 
 async def bash_execute(
@@ -200,6 +200,7 @@ async def bash_execute(
     max_output_len: int = 50_000,
     env_overrides: dict[str, str] | None = None,
     agent_name: str = "",
+    sigterm_grace: float = _DEFAULT_SIGTERM_GRACE_SECONDS,
 ) -> BashResult:
     """Execute *command* in a subprocess within *workspace*.
 
@@ -219,6 +220,8 @@ async def bash_execute(
         Additional environment variables to set.
     agent_name:
         Agent identifier for process tracking.
+    sigterm_grace:
+        Seconds to wait after SIGTERM before escalating to SIGKILL.
 
     Raises
     ------
@@ -268,7 +271,7 @@ async def bash_execute(
             try:
                 await asyncio.wait_for(
                     process.communicate(),
-                    timeout=_SIGTERM_GRACE_SECONDS,
+                    timeout=sigterm_grace,
                 )
             except TimeoutError:
                 with contextlib.suppress(ProcessLookupError):
