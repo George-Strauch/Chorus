@@ -48,6 +48,20 @@ CREATE TABLE IF NOT EXISTS settings (
     value TEXT NOT NULL,
     PRIMARY KEY (guild_id, key)
 );
+
+CREATE TABLE IF NOT EXISTS thread_steps (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_name TEXT NOT NULL,
+    thread_id INTEGER NOT NULL,
+    step_number INTEGER NOT NULL,
+    description TEXT NOT NULL,
+    started_at TEXT NOT NULL,
+    ended_at TEXT,
+    duration_ms INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS idx_thread_steps_agent_thread
+    ON thread_steps(agent_name, thread_id);
 """
 
 
@@ -148,6 +162,67 @@ class Database:
                 "permissions": row[4],
                 "created_at": row[5],
                 "status": row[6],
+            }
+            for row in rows
+        ]
+
+    async def get_agent_by_channel(self, channel_id: int) -> dict[str, object] | None:
+        """Fetch a single agent by channel ID, or None if not found."""
+        async with self.connection.execute(
+            "SELECT name, channel_id, guild_id, model, permissions, created_at, status "
+            "FROM agents WHERE channel_id = ?",
+            (channel_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+        if row is None:
+            return None
+        return {
+            "name": row[0],
+            "channel_id": row[1],
+            "guild_id": row[2],
+            "model": row[3],
+            "permissions": row[4],
+            "created_at": row[5],
+            "status": row[6],
+        }
+
+    async def persist_thread_step(
+        self,
+        agent_name: str,
+        thread_id: int,
+        step_number: int,
+        description: str,
+        started_at: str,
+        ended_at: str | None = None,
+        duration_ms: int | None = None,
+    ) -> None:
+        """Insert a thread step record."""
+        await self.connection.execute(
+            "INSERT INTO thread_steps "
+            "(agent_name, thread_id, step_number, description, started_at, ended_at, duration_ms) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (agent_name, thread_id, step_number, description, started_at, ended_at, duration_ms),
+        )
+        await self.connection.commit()
+
+    async def get_thread_steps(
+        self, agent_name: str, thread_id: int
+    ) -> list[dict[str, object]]:
+        """Get all steps for a thread, ordered by step_number."""
+        async with self.connection.execute(
+            "SELECT step_number, description, started_at, ended_at, duration_ms "
+            "FROM thread_steps WHERE agent_name = ? AND thread_id = ? "
+            "ORDER BY step_number",
+            (agent_name, thread_id),
+        ) as cursor:
+            rows = await cursor.fetchall()
+        return [
+            {
+                "step_number": row[0],
+                "description": row[1],
+                "started_at": row[2],
+                "ended_at": row[3],
+                "duration_ms": row[4],
             }
             for row in rows
         ]

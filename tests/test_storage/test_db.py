@@ -109,6 +109,46 @@ class TestAgentStorage:
         assert len(agents) == 2
 
 
+class TestThreadStepStorage:
+    async def test_persist_thread_step(self, db: Database) -> None:
+        await db.persist_thread_step(
+            agent_name="test-bot",
+            thread_id=1,
+            step_number=1,
+            description="Calling LLM",
+            started_at="2026-02-12T10:00:00",
+            ended_at="2026-02-12T10:00:02",
+            duration_ms=2000,
+        )
+        steps = await db.get_thread_steps("test-bot", 1)
+        assert len(steps) == 1
+        assert steps[0]["description"] == "Calling LLM"
+        assert steps[0]["duration_ms"] == 2000
+
+    async def test_get_thread_steps_ordered(self, db: Database) -> None:
+        for i in range(1, 4):
+            await db.persist_thread_step(
+                agent_name="test-bot",
+                thread_id=1,
+                step_number=i,
+                description=f"Step {i}",
+                started_at=f"2026-02-12T10:00:0{i}",
+            )
+        steps = await db.get_thread_steps("test-bot", 1)
+        assert len(steps) == 3
+        assert [s["step_number"] for s in steps] == [1, 2, 3]
+
+    async def test_get_agent_by_channel(self, db: Database) -> None:
+        now = datetime.now(UTC).isoformat()
+        await db.register_agent("test-bot", 12345, 99999, None, "standard", now)
+        agent = await db.get_agent_by_channel(12345)
+        assert agent is not None
+        assert agent["name"] == "test-bot"
+
+        missing = await db.get_agent_by_channel(99999)
+        assert missing is None
+
+
 class TestSessionStorage:
     def test_save_session(self) -> None:
         pytest.skip("Not implemented yet — TODO 007")

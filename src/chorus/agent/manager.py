@@ -64,6 +64,13 @@ class AgentManager:
         rows = await self._db.list_agents(guild_id)
         return [Agent.from_dict(row) for row in rows]
 
+    async def get_agent_by_channel(self, channel_id: int) -> Agent | None:
+        """Look up an agent by its Discord channel ID."""
+        row = await self._db.get_agent_by_channel(channel_id)
+        if row is None:
+            return None
+        return Agent.from_dict(row)
+
     async def configure(self, name: str, key: str, value: str) -> None:
         """Update a single configuration key in an agent's agent.json."""
         if key not in CONFIGURABLE_KEYS:

@@ -11,9 +11,12 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncGenerator
     from pathlib import Path
 
+from chorus.agent.threads import ThreadManager
 from chorus.config import BotConfig
+from chorus.storage.db import Database
 
 
 @pytest.fixture
@@ -204,6 +207,27 @@ def git_workspace_with_remote(tmp_path: Path) -> tuple[Path, Path]:
     run_in(ws, ["git", "remote", "add", "origin", str(bare)])
     run_in(ws, ["git", "push", "-u", "origin", "main"])
     return ws, bare
+
+
+@pytest.fixture
+def thread_manager() -> ThreadManager:
+    """Create a ThreadManager for testing (no DB)."""
+    return ThreadManager("test-agent")
+
+
+@pytest.fixture
+async def thread_db(tmp_path: Path) -> AsyncGenerator[Database, None]:
+    """Create a temporary Database for thread tests."""
+    db = Database(tmp_path / "db" / "chorus.db")
+    await db.init()
+    yield db
+    await db.close()
+
+
+@pytest.fixture
+async def thread_manager_with_db(thread_db: Database) -> ThreadManager:
+    """Create a ThreadManager with a real database."""
+    return ThreadManager("test-agent", db=thread_db)
 
 
 @pytest.fixture

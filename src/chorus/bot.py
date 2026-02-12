@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import pkgutil
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import discord
 from discord import app_commands
@@ -14,8 +15,12 @@ from dotenv import load_dotenv
 import chorus.commands
 from chorus.agent.directory import AgentDirectory
 from chorus.agent.manager import AgentManager
+from chorus.agent.threads import ThreadManager, ThreadStatus
 from chorus.config import BotConfig
 from chorus.storage.db import Database
+
+if TYPE_CHECKING:
+    from chorus.agent.message_queue import ChannelMessageQueue
 
 logger = logging.getLogger("chorus.bot")
 
@@ -25,6 +30,11 @@ class ChorusBot(commands.Bot):
 
     def __init__(self, config: BotConfig) -> None:
         self.config = config
+
+        # Thread management state (initialized early so on_message works pre-setup_hook)
+        self._thread_managers: dict[str, ThreadManager] = {}
+        self._channel_to_agent: dict[int, str] = {}
+        self._message_queues: dict[int, ChannelMessageQueue] = {}
 
         intents = discord.Intents.default()
         intents.guilds = True
@@ -81,7 +91,9 @@ class ChorusBot(commands.Bot):
                 await interaction.followup.send(msg, ephemeral=True)
 
     async def close(self) -> None:
-        """Shut down database and disconnect."""
+        """Kill all threads, shut down database, and disconnect."""
+        for tm in self._thread_managers.values():
+            await tm.kill_all()
         if hasattr(self, "db"):
             await self.db.close()
         await super().close()
@@ -106,10 +118,40 @@ class ChorusBot(commands.Bot):
             logger.info("Commands synced globally")
 
     async def on_message(self, message: discord.Message) -> None:
-        """Ignore own messages, process commands for others."""
+        """Route messages to agent threads or process as commands."""
         if message.author == self.user:
             return
-        await self.process_commands(message)
+
+        # Check if this channel is bound to an agent
+        agent_name = self._channel_to_agent.get(message.channel.id)
+        if agent_name is None and hasattr(self, "agent_manager"):
+            agent = await self.agent_manager.get_agent_by_channel(message.channel.id)
+            if agent is not None:
+                agent_name = agent.name
+                self._channel_to_agent[message.channel.id] = agent_name
+
+        if agent_name is None:
+            await self.process_commands(message)
+            return
+
+        # Get or create ThreadManager for this agent
+        tm = self._thread_managers.setdefault(
+            agent_name, ThreadManager(agent_name, db=self.db)
+        )
+
+        # Route: reply → existing thread, non-reply → new thread
+        thread = None
+        if message.reference and message.reference.message_id:
+            thread = tm.route_message(message.reference.message_id)
+
+        if thread is None:
+            thread = tm.create_thread({"role": "user", "content": message.content})
+        else:
+            thread.messages.append({"role": "user", "content": message.content})
+
+        # Start if not running (uses _default_runner until TODO 008 wires the real LLM loop)
+        if thread.status != ThreadStatus.RUNNING:
+            tm.start_thread(thread)
 
 
 def main() -> None:
