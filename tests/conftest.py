@@ -143,6 +143,14 @@ def workspace_dir(tmp_agent_dir: Path) -> Path:
 
 
 @pytest.fixture
+def safe_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Set dummy secret env vars to verify they're stripped from subprocess."""
+    monkeypatch.setenv("DISCORD_TOKEN", "dummy-discord-token-for-testing")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-dummy-key")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai-dummy-key")
+
+
+@pytest.fixture
 def sample_permission_profiles() -> dict[str, dict[str, list[str]]]:
     """Return the built-in permission profile presets."""
     return {

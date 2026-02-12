@@ -36,7 +36,8 @@ class ToolRegistry:
 
 
 def create_default_registry() -> ToolRegistry:
-    """Build a registry with the built-in file tools pre-registered."""
+    """Build a registry with the built-in tools pre-registered."""
+    from chorus.tools.bash import bash_execute
     from chorus.tools.file_ops import create_file, str_replace, view
 
     registry = ToolRegistry()
@@ -121,6 +122,31 @@ def create_default_registry() -> ToolRegistry:
                 "required": ["path"],
             },
             handler=view,
+        )
+    )
+
+    registry.register(
+        ToolDefinition(
+            name="bash",
+            description=(
+                "Execute a shell command in the agent's workspace directory. "
+                "The command runs with a sanitized environment and configurable timeout."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "description": "Shell command to execute",
+                    },
+                    "timeout": {
+                        "type": "number",
+                        "description": "Timeout in seconds (default 120)",
+                    },
+                },
+                "required": ["command"],
+            },
+            handler=bash_execute,
         )
     )
 
