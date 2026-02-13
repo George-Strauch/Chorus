@@ -366,6 +366,21 @@ class Database:
         await self.connection.commit()
         logger.info("Updated agent %s channel_id to %d", name, new_channel_id)
 
+    async def update_agent_field(self, name: str, field: str, value: str | None) -> None:
+        """Update a single column in the agents table.
+
+        Only ``permissions`` and ``model`` are allowed to prevent misuse.
+        """
+        allowed = {"permissions", "model"}
+        if field not in allowed:
+            raise ValueError(f"Cannot update field {field!r}; allowed: {allowed}")
+        await self.connection.execute(
+            f"UPDATE agents SET {field} = ? WHERE name = ?",  # noqa: S608
+            (value, name),
+        )
+        await self.connection.commit()
+        logger.info("Updated agent %s %s to %s", name, field, value)
+
     # ── Clear time ───────────────────────────────────────────────────────
 
     async def get_last_clear_time(self, agent_name: str) -> str | None:

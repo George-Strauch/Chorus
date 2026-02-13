@@ -215,6 +215,7 @@ async def edit_permissions(
     _atomic_write_json(agent_json, data)
 
     if db is not None:
+        await db.update_agent_field(agent_name, "permissions", profile)
         await db.log_self_edit(
             agent_name=agent_name,
             edit_type="permissions",
@@ -260,6 +261,7 @@ async def edit_model(
     _atomic_write_json(agent_json, data)
 
     if db is not None:
+        await db.update_agent_field(agent_name, "model", model)
         await db.log_self_edit(
             agent_name=agent_name,
             edit_type="model",
