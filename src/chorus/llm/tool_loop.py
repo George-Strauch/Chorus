@@ -11,7 +11,8 @@ import asyncio
 import inspect
 import json
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from enum import Enum
 from typing import TYPE_CHECKING, Any
 
 from chorus.llm.providers import (
@@ -123,6 +124,43 @@ class ToolLoopResult:
     tool_calls_made: int
 
 
+class ToolLoopEventType(Enum):
+    """Lifecycle events emitted during the tool loop."""
+
+    LLM_CALL_START = "llm_call_start"
+    LLM_CALL_COMPLETE = "llm_call_complete"
+    TOOL_CALL_START = "tool_call_start"
+    TOOL_CALL_COMPLETE = "tool_call_complete"
+    LOOP_COMPLETE = "loop_complete"
+
+
+@dataclass
+class ToolLoopEvent:
+    """Event payload for tool loop lifecycle callbacks."""
+
+    type: ToolLoopEventType
+    iteration: int
+    tool_name: str | None = None
+    usage_delta: Usage | None = None
+    total_usage: Usage | None = None
+    tool_calls_made: int = 0
+    tools_used: list[str] = field(default_factory=list)
+    content_preview: str | None = None
+
+
+async def _fire_event(
+    on_event: Callable[[ToolLoopEvent], Awaitable[None]] | None,
+    event: ToolLoopEvent,
+) -> None:
+    """Fire an event callback, swallowing any errors."""
+    if on_event is None:
+        return
+    try:
+        await on_event(event)
+    except Exception:
+        logger.warning("on_event callback error for %s", event.type, exc_info=True)
+
+
 # ---------------------------------------------------------------------------
 # Tool execution
 # ---------------------------------------------------------------------------
@@ -181,6 +219,7 @@ async def run_tool_loop(
     max_iterations: int = 25,
     ask_callback: Callable[[str, str], Awaitable[bool]] | None = None,
     inject_queue: asyncio.Queue[dict[str, Any]] | None = None,
+    on_event: Callable[[ToolLoopEvent], Awaitable[None]] | None = None,
 ) -> ToolLoopResult:
     """Run the agentic tool use loop.
 
@@ -218,13 +257,12 @@ async def run_tool_loop(
 
     # Prepend system prompt as a system message if not already present
     working_messages = list(messages)
-    if system_prompt and (
-        not working_messages or working_messages[0].get("role") != "system"
-    ):
+    if system_prompt and (not working_messages or working_messages[0].get("role") != "system"):
         working_messages.insert(0, {"role": "system", "content": system_prompt})
 
     total_usage = Usage(input_tokens=0, output_tokens=0)
     total_tool_calls = 0
+    tools_used: list[str] = []
 
     for iteration in range(1, max_iterations + 1):
         # Drain injected messages from the queue before each LLM call
@@ -236,6 +274,17 @@ async def run_tool_loop(
                 except asyncio.QueueEmpty:
                     break
 
+        await _fire_event(
+            on_event,
+            ToolLoopEvent(
+                type=ToolLoopEventType.LLM_CALL_START,
+                iteration=iteration,
+                tool_calls_made=total_tool_calls,
+                tools_used=list(tools_used),
+                total_usage=total_usage,
+            ),
+        )
+
         response = await provider.chat(
             messages=working_messages,
             tools=tool_schemas,
@@ -244,8 +293,31 @@ async def run_tool_loop(
 
         total_usage = total_usage + response.usage
 
+        await _fire_event(
+            on_event,
+            ToolLoopEvent(
+                type=ToolLoopEventType.LLM_CALL_COMPLETE,
+                iteration=iteration,
+                usage_delta=response.usage,
+                total_usage=total_usage,
+                tool_calls_made=total_tool_calls,
+                tools_used=list(tools_used),
+            ),
+        )
+
         # No tool calls → we're done
         if not response.tool_calls:
+            await _fire_event(
+                on_event,
+                ToolLoopEvent(
+                    type=ToolLoopEventType.LOOP_COMPLETE,
+                    iteration=iteration,
+                    total_usage=total_usage,
+                    tool_calls_made=total_tool_calls,
+                    tools_used=list(tools_used),
+                    content_preview=(response.content or "")[:200],
+                ),
+            )
             return ToolLoopResult(
                 content=response.content,
                 messages=working_messages,
@@ -271,18 +343,55 @@ async def run_tool_loop(
 
         # Execute each tool call
         for tc in response.tool_calls:
+            await _fire_event(
+                on_event,
+                ToolLoopEvent(
+                    type=ToolLoopEventType.TOOL_CALL_START,
+                    iteration=iteration,
+                    tool_name=tc.name,
+                    tool_calls_made=total_tool_calls,
+                    tools_used=list(tools_used),
+                    total_usage=total_usage,
+                ),
+            )
+
             result_content = await _handle_tool_call(tc, tools, ctx, ask_callback)
-            working_messages.append({
-                "role": "tool",
-                "tool_call_id": tc.id,
-                "content": result_content,
-            })
+            working_messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": tc.id,
+                    "content": result_content,
+                }
+            )
             total_tool_calls += 1
+            if tc.name not in tools_used:
+                tools_used.append(tc.name)
+
+            await _fire_event(
+                on_event,
+                ToolLoopEvent(
+                    type=ToolLoopEventType.TOOL_CALL_COMPLETE,
+                    iteration=iteration,
+                    tool_name=tc.name,
+                    tool_calls_made=total_tool_calls,
+                    tools_used=list(tools_used),
+                    total_usage=total_usage,
+                ),
+            )
 
     # Reached max iterations
+    await _fire_event(
+        on_event,
+        ToolLoopEvent(
+            type=ToolLoopEventType.LOOP_COMPLETE,
+            iteration=max_iterations,
+            total_usage=total_usage,
+            tool_calls_made=total_tool_calls,
+            tools_used=list(tools_used),
+        ),
+    )
     return ToolLoopResult(
-        content=f"Stopped after max iterations ({max_iterations}). "
-        "The task may be incomplete.",
+        content=f"Stopped after max iterations ({max_iterations}). The task may be incomplete.",
         messages=working_messages,
         total_usage=total_usage,
         iterations=max_iterations,

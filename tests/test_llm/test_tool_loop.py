@@ -12,6 +12,8 @@ import pytest
 from chorus.llm.providers import LLMResponse, ToolCall, Usage
 from chorus.llm.tool_loop import (
     ToolExecutionContext,
+    ToolLoopEvent,
+    ToolLoopEventType,
     ToolLoopResult,
     run_tool_loop,
 )
@@ -151,10 +153,14 @@ class TestToolLoopCore:
         handler = AsyncMock(return_value={"result": "file created"})
         registry = _make_registry(("create_file", handler))
 
-        provider = FakeProvider([
-            _tool_response([ToolCall(id="tc_1", name="create_file", arguments={"arg": "test"})]),
-            _text_response("File created successfully."),
-        ])
+        provider = FakeProvider(
+            [
+                _tool_response(
+                    [ToolCall(id="tc_1", name="create_file", arguments={"arg": "test"})]
+                ),
+                _text_response("File created successfully."),
+            ]
+        )
 
         ctx = _make_ctx(tmp_path)
         result = await run_tool_loop(
@@ -177,13 +183,17 @@ class TestToolLoopCore:
         h2 = AsyncMock(return_value={"result": "done 2"})
         registry = _make_registry(("tool_a", h1), ("tool_b", h2))
 
-        provider = FakeProvider([
-            _tool_response([
-                ToolCall(id="tc_1", name="tool_a", arguments={"arg": "x"}),
-                ToolCall(id="tc_2", name="tool_b", arguments={"arg": "y"}),
-            ]),
-            _text_response("Both done."),
-        ])
+        provider = FakeProvider(
+            [
+                _tool_response(
+                    [
+                        ToolCall(id="tc_1", name="tool_a", arguments={"arg": "x"}),
+                        ToolCall(id="tc_2", name="tool_b", arguments={"arg": "y"}),
+                    ]
+                ),
+                _text_response("Both done."),
+            ]
+        )
 
         ctx = _make_ctx(tmp_path)
         result = await run_tool_loop(
@@ -205,10 +215,12 @@ class TestToolLoopCore:
         handler = AsyncMock(return_value={"output": "42"})
         registry = _make_registry(("compute", handler))
 
-        provider = FakeProvider([
-            _tool_response([ToolCall(id="tc_1", name="compute", arguments={"arg": "6*7"})]),
-            _text_response("The answer is 42."),
-        ])
+        provider = FakeProvider(
+            [
+                _tool_response([ToolCall(id="tc_1", name="compute", arguments={"arg": "6*7"})]),
+                _text_response("The answer is 42."),
+            ]
+        )
 
         ctx = _make_ctx(tmp_path)
         await run_tool_loop(
@@ -231,11 +243,13 @@ class TestToolLoopCore:
         handler = AsyncMock(side_effect=[{"step": "1"}, {"step": "2"}])
         registry = _make_registry(("step_tool", handler))
 
-        provider = FakeProvider([
-            _tool_response([ToolCall(id="tc_1", name="step_tool", arguments={"arg": "1"})]),
-            _tool_response([ToolCall(id="tc_2", name="step_tool", arguments={"arg": "2"})]),
-            _text_response("Both steps complete."),
-        ])
+        provider = FakeProvider(
+            [
+                _tool_response([ToolCall(id="tc_1", name="step_tool", arguments={"arg": "1"})]),
+                _tool_response([ToolCall(id="tc_2", name="step_tool", arguments={"arg": "2"})]),
+                _text_response("Both steps complete."),
+            ]
+        )
 
         ctx = _make_ctx(tmp_path)
         result = await run_tool_loop(
@@ -289,10 +303,12 @@ class TestToolLoopPermissions:
         handler = AsyncMock(return_value={"ok": True})
         registry = _make_registry(("my_tool", handler))
 
-        provider = FakeProvider([
-            _tool_response([ToolCall(id="tc_1", name="my_tool", arguments={"arg": "x"})]),
-            _text_response("Done."),
-        ])
+        provider = FakeProvider(
+            [
+                _tool_response([ToolCall(id="tc_1", name="my_tool", arguments={"arg": "x"})]),
+                _text_response("Done."),
+            ]
+        )
 
         ctx = _make_ctx(tmp_path)
         ctx.profile = _open_profile()
@@ -314,10 +330,12 @@ class TestToolLoopPermissions:
         handler = AsyncMock(return_value={"ok": True})
         registry = _make_registry(("my_tool", handler))
 
-        provider = FakeProvider([
-            _tool_response([ToolCall(id="tc_1", name="my_tool", arguments={"arg": "x"})]),
-            _text_response("Permission denied, sorry."),
-        ])
+        provider = FakeProvider(
+            [
+                _tool_response([ToolCall(id="tc_1", name="my_tool", arguments={"arg": "x"})]),
+                _text_response("Permission denied, sorry."),
+            ]
+        )
 
         ctx = _make_ctx(tmp_path)
         ctx.profile = _deny_profile()
@@ -342,10 +360,12 @@ class TestToolLoopPermissions:
         handler = AsyncMock(return_value={"ok": True})
         registry = _make_registry(("my_tool", handler))
 
-        provider = FakeProvider([
-            _tool_response([ToolCall(id="tc_1", name="my_tool", arguments={"arg": "x"})]),
-            _text_response("Approved and done."),
-        ])
+        provider = FakeProvider(
+            [
+                _tool_response([ToolCall(id="tc_1", name="my_tool", arguments={"arg": "x"})]),
+                _text_response("Approved and done."),
+            ]
+        )
 
         ctx = _make_ctx(tmp_path)
         ctx.profile = _ask_profile()
@@ -371,10 +391,12 @@ class TestToolLoopPermissions:
         handler = AsyncMock(return_value={"ok": True})
         registry = _make_registry(("my_tool", handler))
 
-        provider = FakeProvider([
-            _tool_response([ToolCall(id="tc_1", name="my_tool", arguments={"arg": "x"})]),
-            _text_response("User declined."),
-        ])
+        provider = FakeProvider(
+            [
+                _tool_response([ToolCall(id="tc_1", name="my_tool", arguments={"arg": "x"})]),
+                _text_response("User declined."),
+            ]
+        )
 
         ctx = _make_ctx(tmp_path)
         ctx.profile = _ask_profile()
@@ -399,10 +421,12 @@ class TestToolLoopPermissions:
         handler = AsyncMock(return_value={"ok": True})
         registry = _make_registry(("my_tool", handler))
 
-        provider = FakeProvider([
-            _tool_response([ToolCall(id="tc_1", name="my_tool", arguments={"arg": "x"})]),
-            _text_response("No callback available."),
-        ])
+        provider = FakeProvider(
+            [
+                _tool_response([ToolCall(id="tc_1", name="my_tool", arguments={"arg": "x"})]),
+                _text_response("No callback available."),
+            ]
+        )
 
         ctx = _make_ctx(tmp_path)
         ctx.profile = _ask_profile()
@@ -431,10 +455,12 @@ class TestToolLoopErrors:
         handler = AsyncMock(side_effect=RuntimeError("disk full"))
         registry = _make_registry(("failing_tool", handler))
 
-        provider = FakeProvider([
-            _tool_response([ToolCall(id="tc_1", name="failing_tool", arguments={"arg": "x"})]),
-            _text_response("Tool failed, I'll try something else."),
-        ])
+        provider = FakeProvider(
+            [
+                _tool_response([ToolCall(id="tc_1", name="failing_tool", arguments={"arg": "x"})]),
+                _text_response("Tool failed, I'll try something else."),
+            ]
+        )
 
         ctx = _make_ctx(tmp_path)
         await run_tool_loop(
@@ -455,10 +481,12 @@ class TestToolLoopErrors:
     async def test_unknown_tool_returns_error(self, tmp_path: Path) -> None:
         registry = _make_registry()  # empty registry
 
-        provider = FakeProvider([
-            _tool_response([ToolCall(id="tc_1", name="nonexistent", arguments={"arg": "x"})]),
-            _text_response("Tool not found, sorry."),
-        ])
+        provider = FakeProvider(
+            [
+                _tool_response([ToolCall(id="tc_1", name="nonexistent", arguments={"arg": "x"})]),
+                _text_response("Tool not found, sorry."),
+            ]
+        )
 
         ctx = _make_ctx(tmp_path)
         await run_tool_loop(
@@ -515,10 +543,12 @@ class TestToolLoopUsage:
         handler = AsyncMock(return_value={"ok": True})
         registry = _make_registry(("my_tool", handler))
 
-        provider = FakeProvider([
-            _tool_response([ToolCall(id="tc_1", name="my_tool", arguments={"arg": "x"})]),
-            _text_response("Done."),
-        ])
+        provider = FakeProvider(
+            [
+                _tool_response([ToolCall(id="tc_1", name="my_tool", arguments={"arg": "x"})]),
+                _text_response("Done."),
+            ]
+        )
 
         ctx = _make_ctx(tmp_path)
         result = await run_tool_loop(
@@ -589,9 +619,9 @@ class TestToolLoopInjection:
                 nonlocal call_count
                 call_count += 1
                 if call_count == 1:
-                    return _tool_response([
-                        ToolCall(id="tc_1", name="my_tool", arguments={"arg": "x"})
-                    ])
+                    return _tool_response(
+                        [ToolCall(id="tc_1", name="my_tool", arguments={"arg": "x"})]
+                    )
                 # On second call, check that the injected message is present
                 user_msgs = [m for m in messages if m.get("role") == "user"]
                 assert any("interjected" in m.get("content", "") for m in user_msgs), (
@@ -676,10 +706,7 @@ class TestToolLoopInjection:
                 model: str | None = None,
             ) -> LLMResponse:
                 # All three injected messages should appear in order
-                user_contents = [
-                    m["content"] for m in messages
-                    if m.get("role") == "user"
-                ]
+                user_contents = [m["content"] for m in messages if m.get("role") == "user"]
                 # Should have: "initial", "first", "second", "third"
                 assert "first" in user_contents
                 assert "second" in user_contents
@@ -737,16 +764,20 @@ class TestToolContextInjection:
             )
         )
 
-        provider = FakeProvider([
-            _tool_response([
-                ToolCall(
-                    id="tc_1",
-                    name="create_file",
-                    arguments={"path": "test.txt", "content": "hello"},
-                )
-            ]),
-            _text_response("Done."),
-        ])
+        provider = FakeProvider(
+            [
+                _tool_response(
+                    [
+                        ToolCall(
+                            id="tc_1",
+                            name="create_file",
+                            arguments={"path": "test.txt", "content": "hello"},
+                        )
+                    ]
+                ),
+                _text_response("Done."),
+            ]
+        )
 
         ctx = _make_ctx(tmp_path)
         await run_tool_loop(
@@ -763,3 +794,242 @@ class TestToolContextInjection:
         assert isinstance(received["workspace"], Path)
         assert received["path"] == "test.txt"
         assert received["content"] == "hello"
+
+
+# ---------------------------------------------------------------------------
+# on_event callback
+# ---------------------------------------------------------------------------
+
+
+class TestToolLoopOnEvent:
+    @pytest.mark.asyncio
+    async def test_on_event_fires_for_simple_tool_scenario(self, tmp_path: Path) -> None:
+        """Recording callback captures expected event sequence."""
+        handler = AsyncMock(return_value={"ok": True})
+        registry = _make_registry(("my_tool", handler))
+
+        provider = FakeProvider(
+            [
+                _tool_response([ToolCall(id="tc_1", name="my_tool", arguments={"arg": "x"})]),
+                _text_response("Done."),
+            ]
+        )
+
+        events: list[ToolLoopEvent] = []
+
+        async def recorder(event: ToolLoopEvent) -> None:
+            events.append(event)
+
+        ctx = _make_ctx(tmp_path)
+        await run_tool_loop(
+            provider=provider,
+            messages=[{"role": "user", "content": "Do it"}],
+            tools=registry,
+            ctx=ctx,
+            system_prompt="",
+            model="test",
+            on_event=recorder,
+        )
+
+        types = [e.type for e in events]
+        assert types == [
+            ToolLoopEventType.LLM_CALL_START,
+            ToolLoopEventType.LLM_CALL_COMPLETE,
+            ToolLoopEventType.TOOL_CALL_START,
+            ToolLoopEventType.TOOL_CALL_COMPLETE,
+            ToolLoopEventType.LLM_CALL_START,
+            ToolLoopEventType.LLM_CALL_COMPLETE,
+            ToolLoopEventType.LOOP_COMPLETE,
+        ]
+
+    @pytest.mark.asyncio
+    async def test_on_event_error_logged_not_raised(self, tmp_path: Path) -> None:
+        """If the callback raises, the loop still completes."""
+
+        async def bad_callback(event: ToolLoopEvent) -> None:
+            raise RuntimeError("callback boom")
+
+        provider = FakeProvider([_text_response("Hi")])
+        ctx = _make_ctx(tmp_path)
+
+        result = await run_tool_loop(
+            provider=provider,
+            messages=[{"role": "user", "content": "Hi"}],
+            tools=_make_registry(),
+            ctx=ctx,
+            system_prompt="",
+            model="test",
+            on_event=bad_callback,
+        )
+
+        assert result.content == "Hi"
+
+    @pytest.mark.asyncio
+    async def test_on_event_none_backward_compat(self, tmp_path: Path) -> None:
+        """on_event=None works fine (backward compat)."""
+        provider = FakeProvider([_text_response("Hi")])
+        ctx = _make_ctx(tmp_path)
+
+        result = await run_tool_loop(
+            provider=provider,
+            messages=[{"role": "user", "content": "Hi"}],
+            tools=_make_registry(),
+            ctx=ctx,
+            system_prompt="",
+            model="test",
+            on_event=None,
+        )
+
+        assert result.content == "Hi"
+
+    @pytest.mark.asyncio
+    async def test_on_event_usage_delta_correct(self, tmp_path: Path) -> None:
+        """LLM_CALL_COMPLETE carries per-call usage delta."""
+        handler = AsyncMock(return_value={"ok": True})
+        registry = _make_registry(("my_tool", handler))
+
+        provider = FakeProvider(
+            [
+                _tool_response([ToolCall(id="tc_1", name="my_tool", arguments={"arg": "x"})]),
+                _text_response("Done."),
+            ]
+        )
+
+        events: list[ToolLoopEvent] = []
+
+        async def recorder(event: ToolLoopEvent) -> None:
+            events.append(event)
+
+        ctx = _make_ctx(tmp_path)
+        await run_tool_loop(
+            provider=provider,
+            messages=[{"role": "user", "content": "Do it"}],
+            tools=registry,
+            ctx=ctx,
+            system_prompt="",
+            model="test",
+            on_event=recorder,
+        )
+
+        complete_events = [e for e in events if e.type == ToolLoopEventType.LLM_CALL_COMPLETE]
+        assert len(complete_events) == 2
+        # First call: _tool_response uses 20 in / 15 out
+        assert complete_events[0].usage_delta is not None
+        assert complete_events[0].usage_delta.input_tokens == 20
+        assert complete_events[0].usage_delta.output_tokens == 15
+        # Second call: _text_response uses 10 in / 5 out
+        assert complete_events[1].usage_delta is not None
+        assert complete_events[1].usage_delta.input_tokens == 10
+        assert complete_events[1].usage_delta.output_tokens == 5
+        # Total usage on second complete event
+        assert complete_events[1].total_usage is not None
+        assert complete_events[1].total_usage.input_tokens == 30
+        assert complete_events[1].total_usage.output_tokens == 20
+
+    @pytest.mark.asyncio
+    async def test_on_event_iteration_count(self, tmp_path: Path) -> None:
+        """Events carry the correct iteration number."""
+        handler = AsyncMock(return_value={"ok": True})
+        registry = _make_registry(("my_tool", handler))
+
+        provider = FakeProvider(
+            [
+                _tool_response([ToolCall(id="tc_1", name="my_tool", arguments={"arg": "x"})]),
+                _text_response("Done."),
+            ]
+        )
+
+        events: list[ToolLoopEvent] = []
+
+        async def recorder(event: ToolLoopEvent) -> None:
+            events.append(event)
+
+        ctx = _make_ctx(tmp_path)
+        await run_tool_loop(
+            provider=provider,
+            messages=[{"role": "user", "content": "Do it"}],
+            tools=registry,
+            ctx=ctx,
+            system_prompt="",
+            model="test",
+            on_event=recorder,
+        )
+
+        # First iteration events
+        iter1_events = [e for e in events if e.iteration == 1]
+        assert len(iter1_events) == 4  # LLM_START, LLM_COMPLETE, TOOL_START, TOOL_COMPLETE
+        # Second iteration events
+        iter2_events = [e for e in events if e.iteration == 2]
+        assert len(iter2_events) == 3  # LLM_START, LLM_COMPLETE, LOOP_COMPLETE
+
+    @pytest.mark.asyncio
+    async def test_on_event_tools_used_accumulates(self, tmp_path: Path) -> None:
+        """Two different tools → both appear in tools_used."""
+        h1 = AsyncMock(return_value={"ok": True})
+        h2 = AsyncMock(return_value={"ok": True})
+        registry = _make_registry(("tool_a", h1), ("tool_b", h2))
+
+        provider = FakeProvider(
+            [
+                _tool_response(
+                    [
+                        ToolCall(id="tc_1", name="tool_a", arguments={"arg": "x"}),
+                        ToolCall(id="tc_2", name="tool_b", arguments={"arg": "y"}),
+                    ]
+                ),
+                _text_response("Done."),
+            ]
+        )
+
+        events: list[ToolLoopEvent] = []
+
+        async def recorder(event: ToolLoopEvent) -> None:
+            events.append(event)
+
+        ctx = _make_ctx(tmp_path)
+        await run_tool_loop(
+            provider=provider,
+            messages=[{"role": "user", "content": "Do both"}],
+            tools=registry,
+            ctx=ctx,
+            system_prompt="",
+            model="test",
+            on_event=recorder,
+        )
+
+        loop_complete = [e for e in events if e.type == ToolLoopEventType.LOOP_COMPLETE]
+        assert len(loop_complete) == 1
+        assert set(loop_complete[0].tools_used) == {"tool_a", "tool_b"}
+
+    @pytest.mark.asyncio
+    async def test_on_event_tool_call_start_has_name(self, tmp_path: Path) -> None:
+        """TOOL_CALL_START event carries the tool_name."""
+        handler = AsyncMock(return_value={"ok": True})
+        registry = _make_registry(("my_tool", handler))
+
+        provider = FakeProvider(
+            [
+                _tool_response([ToolCall(id="tc_1", name="my_tool", arguments={"arg": "x"})]),
+                _text_response("Done."),
+            ]
+        )
+
+        events: list[ToolLoopEvent] = []
+
+        async def recorder(event: ToolLoopEvent) -> None:
+            events.append(event)
+
+        ctx = _make_ctx(tmp_path)
+        await run_tool_loop(
+            provider=provider,
+            messages=[{"role": "user", "content": "Do it"}],
+            tools=registry,
+            ctx=ctx,
+            system_prompt="",
+            model="test",
+            on_event=recorder,
+        )
+
+        start_events = [e for e in events if e.type == ToolLoopEventType.TOOL_CALL_START]
+        assert len(start_events) == 1
+        assert start_events[0].tool_name == "my_tool"

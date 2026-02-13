@@ -21,10 +21,16 @@ from chorus.agent.threads import ExecutionThread, ThreadManager, ThreadRunner, T
 from chorus.config import BotConfig, GlobalConfig
 from chorus.llm.providers import AnthropicProvider, LLMProvider, OpenAIProvider
 from chorus.llm.router import RouteDecision, create_router_provider, route_interjection
-from chorus.llm.tool_loop import ToolExecutionContext, run_tool_loop
+from chorus.llm.tool_loop import (
+    ToolExecutionContext,
+    ToolLoopEvent,
+    ToolLoopEventType,
+    run_tool_loop,
+)
 from chorus.permissions.engine import get_preset
 from chorus.storage.db import Database
 from chorus.tools.registry import create_default_registry
+from chorus.ui.status import BotPresenceManager, LiveStatusView
 
 if TYPE_CHECKING:
     from chorus.agent.message_queue import ChannelMessageQueue
@@ -48,6 +54,7 @@ class ChorusBot(commands.Bot):
         self._test_channel: discord.TextChannel | None = None
         self._router_provider: LLMProvider | None = None
         self._router_model: str | None = None
+        self._presence_manager: BotPresenceManager | None = None
 
         intents = discord.Intents.default()
         intents.guilds = True
@@ -107,6 +114,9 @@ class ChorusBot(commands.Bot):
                 await interaction.response.send_message(msg, ephemeral=True)
             else:
                 await interaction.followup.send(msg, ephemeral=True)
+
+        # Initialize presence manager
+        self._presence_manager = BotPresenceManager(self)
 
     async def close(self) -> None:
         """Kill all threads, shut down database, and disconnect."""
@@ -191,9 +201,7 @@ class ChorusBot(commands.Bot):
             logger.info("Created 'Chorus Testing' category in guild %s", guild.name)
 
         # Find or create channel
-        channel = discord.utils.get(
-            guild.text_channels, name=channel_name, category=category
-        )
+        channel = discord.utils.get(guild.text_channels, name=channel_name, category=category)
         if channel is None:
             channel = await guild.create_text_channel(channel_name, category=category)
             logger.info("Created test channel #%s in guild %s", channel_name, guild.name)
@@ -226,17 +234,13 @@ class ChorusBot(commands.Bot):
             return
 
         # Get or create ThreadManager for this agent
-        tm = self._thread_managers.setdefault(
-            agent_name, ThreadManager(agent_name, db=self.db)
-        )
+        tm = self._thread_managers.setdefault(agent_name, ThreadManager(agent_name, db=self.db))
 
         # Get or create ContextManager for this agent
         if agent_name not in self._context_managers:
             agent_dir = self.agent_manager._directory._agents_dir / agent_name
             sessions_dir = agent_dir / "sessions"
-            self._context_managers[agent_name] = ContextManager(
-                agent_name, self.db, sessions_dir
-            )
+            self._context_managers[agent_name] = ContextManager(agent_name, self.db, sessions_dir)
         cm = self._context_managers[agent_name]
 
         # ── Reply-based routing (preserved) ──────────────────────────────
@@ -263,9 +267,7 @@ class ChorusBot(commands.Bot):
 
         if main_thread is None or main_thread.status == ThreadStatus.COMPLETED:
             # No main thread or completed → create a new main thread
-            thread = tm.create_thread(
-                {"role": "user", "content": message.content}, is_main=True
-            )
+            thread = tm.create_thread({"role": "user", "content": message.content}, is_main=True)
             await cm.persist_message(
                 role="user",
                 content=message.content,
@@ -282,9 +284,7 @@ class ChorusBot(commands.Bot):
             # Main thread is busy — ask router whether to inject or spin up new thread
             decision = await self._route_interjection(message.content, main_thread)
             if decision is RouteDecision.INJECT:
-                main_thread.inject_queue.put_nowait(
-                    {"role": "user", "content": message.content}
-                )
+                main_thread.inject_queue.put_nowait({"role": "user", "content": message.content})
                 await cm.persist_message(
                     role="user",
                     content=message.content,
@@ -347,7 +347,6 @@ class ChorusBot(commands.Bot):
             model=self._router_model,
         )
 
-
     def _make_llm_runner(
         self,
         agent: Agent,
@@ -405,32 +404,70 @@ class ChorusBot(commands.Bot):
 
             registry = create_default_registry()
 
-            # Run the tool loop
-            result = await run_tool_loop(
-                provider=provider,
-                messages=llm_messages,
-                tools=registry,
-                ctx=ctx,
-                system_prompt=agent.system_prompt,
-                model=model,
-                max_iterations=self.global_config.max_tool_loop_iterations,
-                inject_queue=thread.inject_queue,
+            # Set up live status view
+            status_view = LiveStatusView(
+                channel=message.channel,
+                agent_name=agent.name,
+                thread_id=thread.id,
+                get_active_count=lambda: len(tm.list_active()),
             )
+            await status_view.start()
+            if self._presence_manager:
+                await self._presence_manager.thread_started(agent.name, thread.id)
 
-            # Send response to Discord
-            if result.content:
-                # Truncate to Discord's 2000 char limit
-                content = result.content[:2000]
-                bot_msg = await message.channel.send(content, reference=message)
-                tm.register_bot_message(bot_msg.id, thread.id)
+            # Bridge tool loop events to status view
+            async def on_event(event: ToolLoopEvent) -> None:
+                updates: dict[str, object] = {}
+                if event.total_usage:
+                    updates["token_usage"] = event.total_usage
+                updates["tool_calls_made"] = event.tool_calls_made
+                updates["tools_used"] = list(event.tools_used)
+                updates["llm_iterations"] = event.iteration
+                if event.type == ToolLoopEventType.TOOL_CALL_START and event.tool_name:
+                    updates["current_step"] = f"Running {event.tool_name}"
+                    updates["step_number"] = event.tool_calls_made + 1
+                elif event.type == ToolLoopEventType.LLM_CALL_START:
+                    updates["current_step"] = f"Thinking (call {event.iteration})"
+                await status_view.update(**updates)
 
-                # Persist assistant message
-                await cm.persist_message(
-                    role="assistant",
-                    content=result.content,
-                    thread_id=thread.id,
-                    discord_message_id=bot_msg.id,
+            try:
+                # Run the tool loop
+                result = await run_tool_loop(
+                    provider=provider,
+                    messages=llm_messages,
+                    tools=registry,
+                    ctx=ctx,
+                    system_prompt=agent.system_prompt,
+                    model=model,
+                    max_iterations=self.global_config.max_tool_loop_iterations,
+                    inject_queue=thread.inject_queue,
+                    on_event=on_event,
                 )
+
+                # Send response to Discord
+                if result.content:
+                    # Truncate to Discord's 2000 char limit, with thread ID suffix
+                    thread_tag = f"\n-# thread {thread.id}"
+                    max_content = 2000 - len(thread_tag)
+                    content = result.content[:max_content] + thread_tag
+                    bot_msg = await message.channel.send(content, reference=message)
+                    tm.register_bot_message(bot_msg.id, thread.id)
+
+                    # Persist assistant message
+                    await cm.persist_message(
+                        role="assistant",
+                        content=result.content,
+                        thread_id=thread.id,
+                        discord_message_id=bot_msg.id,
+                    )
+
+                await status_view.finalize("completed")
+            except Exception as exc:
+                await status_view.finalize("error", error=str(exc))
+                raise
+            finally:
+                if self._presence_manager:
+                    await self._presence_manager.thread_completed(agent.name, thread.id)
 
         return runner
 

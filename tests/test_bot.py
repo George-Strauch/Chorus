@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import discord
@@ -11,8 +11,10 @@ from discord import app_commands
 
 from chorus.agent.directory import AgentDirectory
 from chorus.agent.manager import AgentManager
+from chorus.agent.threads import ExecutionThread, ThreadManager
 from chorus.bot import ChorusBot
 from chorus.config import BotConfig
+from chorus.llm.providers import LLMResponse, Usage
 from chorus.storage.db import Database
 
 if TYPE_CHECKING:
@@ -253,3 +255,231 @@ class TestReconcileChannels:
         synced_channel.delete.assert_not_called()
         guild = bot.get_guild(999)
         guild.create_text_channel.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Live status feedback wiring
+# ---------------------------------------------------------------------------
+
+
+class _FakeProvider:
+    """Minimal fake LLM provider for runner integration tests."""
+
+    def __init__(self, responses: list[LLMResponse]) -> None:
+        self._responses = list(responses)
+        self._idx = 0
+
+    @property
+    def provider_name(self) -> str:
+        return "fake"
+
+    async def chat(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        model: str | None = None,
+    ) -> LLMResponse:
+        if self._idx >= len(self._responses):
+            return LLMResponse(
+                content="(exhausted)",
+                tool_calls=[],
+                stop_reason="end_turn",
+                usage=Usage(0, 0),
+                model="fake",
+            )
+        resp = self._responses[self._idx]
+        self._idx += 1
+        return resp
+
+
+class TestLiveStatusWiring:
+    """Verify that _make_llm_runner wires status embed + presence correctly."""
+
+    def _setup(
+        self,
+        bot_config: BotConfig,
+        tmp_chorus_home: Path,
+        tmp_template: Path,
+        provider_responses: list[LLMResponse],
+    ) -> tuple[ChorusBot, MagicMock, ExecutionThread]:
+        """Build a ChorusBot with mocked components for runner tests."""
+        from chorus.models import Agent
+
+        bot_cfg = BotConfig(
+            discord_token="test-token",
+            chorus_home=tmp_chorus_home,
+            anthropic_api_key="sk-ant-fake",
+        )
+        bot = ChorusBot(bot_cfg)
+
+        # Presence manager
+        bot._presence_manager = MagicMock()
+        bot._presence_manager.thread_started = AsyncMock()
+        bot._presence_manager.thread_completed = AsyncMock()
+
+        # Agent directory
+        directory = AgentDirectory(tmp_chorus_home, tmp_template)
+        directory.ensure_home()
+        directory.create("test-agent")
+
+        bot.agent_manager = MagicMock()
+        bot.agent_manager._directory._agents_dir = tmp_chorus_home / "agents"
+        bot.global_config.max_tool_loop_iterations = 25
+        bot.db = MagicMock()
+
+        # Mock channel + message
+        mock_channel = MagicMock(spec=discord.TextChannel)
+        mock_status_msg = MagicMock(spec=discord.Message)
+        mock_status_msg.edit = AsyncMock()
+        # The first send returns the status embed message, the second is the response
+        bot_response_msg = MagicMock(spec=discord.Message)
+        bot_response_msg.id = 99999
+        mock_channel.send = AsyncMock(side_effect=[mock_status_msg, bot_response_msg])
+
+        mock_message = MagicMock(spec=discord.Message)
+        mock_message.channel = mock_channel
+        mock_message.id = 12345
+        mock_author = MagicMock()
+        mock_author.guild_permissions = MagicMock()
+        mock_author.guild_permissions.manage_guild = False
+        mock_message.author = mock_author
+
+        # Thread manager
+        tm = ThreadManager("test-agent")
+        thread = tm.create_thread({"role": "user", "content": "Hello"}, is_main=True)
+
+        # Context manager mock — needs AsyncMock for async methods
+        cm = MagicMock()
+        cm.persist_message = AsyncMock()
+        cm.get_context = AsyncMock(return_value=[])
+
+        # Agent model
+        agent = Agent(
+            name="test-agent",
+            channel_id=100,
+            model=None,
+            system_prompt="You are helpful.",
+            permissions="open",
+        )
+
+        fake_provider = _FakeProvider(provider_responses)
+        runner = bot._make_llm_runner(agent, tm, cm, mock_message, thread)
+
+        # Stash refs for assertions
+        bot._test_refs = {  # type: ignore[attr-defined]
+            "channel": mock_channel,
+            "status_msg": mock_status_msg,
+            "message": mock_message,
+            "tm": tm,
+            "cm": cm,
+            "thread": thread,
+            "agent": agent,
+            "provider": fake_provider,
+            "runner": runner,
+        }
+
+        return bot, mock_channel, thread
+
+    async def test_runner_sends_status_embed(
+        self, bot_config: BotConfig, tmp_chorus_home: Path, tmp_template: Path
+    ) -> None:
+        """Runner should send an initial status embed on start."""
+        responses = [
+            LLMResponse(
+                content="Hello!",
+                tool_calls=[],
+                stop_reason="end_turn",
+                usage=Usage(10, 5),
+                model="fake",
+            ),
+        ]
+        bot, channel, thread = self._setup(bot_config, tmp_chorus_home, tmp_template, responses)
+        runner = bot._test_refs["runner"]  # type: ignore[attr-defined]
+        provider = bot._test_refs["provider"]  # type: ignore[attr-defined]
+
+        with patch("chorus.bot.AnthropicProvider", return_value=provider):
+            await runner(thread)
+
+        # Channel.send called at least twice: status embed + response
+        assert channel.send.call_count >= 2
+        # First call should have an embed
+        first_call = channel.send.call_args_list[0]
+        assert "embed" in first_call.kwargs
+
+    async def test_runner_finalizes_status_on_completion(
+        self, bot_config: BotConfig, tmp_chorus_home: Path, tmp_template: Path
+    ) -> None:
+        """Status embed is edited to 'completed' after successful loop."""
+        responses = [
+            LLMResponse(
+                content="Done!",
+                tool_calls=[],
+                stop_reason="end_turn",
+                usage=Usage(10, 5),
+                model="fake",
+            ),
+        ]
+        bot, channel, thread = self._setup(bot_config, tmp_chorus_home, tmp_template, responses)
+        runner = bot._test_refs["runner"]  # type: ignore[attr-defined]
+        provider = bot._test_refs["provider"]  # type: ignore[attr-defined]
+
+        with patch("chorus.bot.AnthropicProvider", return_value=provider):
+            await runner(thread)
+
+        # Status message should have been edited (finalize calls edit)
+        status_msg = bot._test_refs["status_msg"]  # type: ignore[attr-defined]
+        status_msg.edit.assert_called()
+        # Last edit should have green (completed) embed
+        last_edit = status_msg.edit.call_args
+        embed = last_edit.kwargs["embed"]
+        assert embed.colour == discord.Colour.green()
+
+    async def test_runner_calls_presence_manager(
+        self, bot_config: BotConfig, tmp_chorus_home: Path, tmp_template: Path
+    ) -> None:
+        """Presence manager thread_started/thread_completed are called."""
+        responses = [
+            LLMResponse(
+                content="Hi!",
+                tool_calls=[],
+                stop_reason="end_turn",
+                usage=Usage(10, 5),
+                model="fake",
+            ),
+        ]
+        bot, channel, thread = self._setup(bot_config, tmp_chorus_home, tmp_template, responses)
+        runner = bot._test_refs["runner"]  # type: ignore[attr-defined]
+        provider = bot._test_refs["provider"]  # type: ignore[attr-defined]
+
+        with patch("chorus.bot.AnthropicProvider", return_value=provider):
+            await runner(thread)
+
+        bot._presence_manager.thread_started.assert_called_once()
+        bot._presence_manager.thread_completed.assert_called_once()
+
+    async def test_runner_includes_thread_id_in_response(
+        self, bot_config: BotConfig, tmp_chorus_home: Path, tmp_template: Path
+    ) -> None:
+        """Response messages should include thread ID."""
+        responses = [
+            LLMResponse(
+                content="Hello!",
+                tool_calls=[],
+                stop_reason="end_turn",
+                usage=Usage(10, 5),
+                model="fake",
+            ),
+        ]
+        bot, channel, thread = self._setup(bot_config, tmp_chorus_home, tmp_template, responses)
+        runner = bot._test_refs["runner"]  # type: ignore[attr-defined]
+        provider = bot._test_refs["provider"]  # type: ignore[attr-defined]
+
+        with patch("chorus.bot.AnthropicProvider", return_value=provider):
+            await runner(thread)
+
+        # Find the call that sends the text response (not the embed)
+        text_calls = [c for c in channel.send.call_args_list if "embed" not in c.kwargs]
+        assert len(text_calls) >= 1
+        first = text_calls[0]
+        content = first.args[0] if first.args else first.kwargs.get("content", "")
+        assert f"thread {thread.id}" in content
