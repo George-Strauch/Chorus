@@ -78,7 +78,7 @@ def get_router_model(
     Raises ``ValueError`` if no API key is available.
     """
     if anthropic_key:
-        return ("anthropic", "claude-haiku-4-20250506")
+        return ("anthropic", "claude-haiku-4-5-20251001")
     if openai_key:
         return ("openai", "gpt-4o-mini")
     raise ValueError("No API key available for router — need Anthropic or OpenAI key")

@@ -9,7 +9,7 @@ from chorus.agent.directory import AgentDirectory, read_agent_json, write_agent_
 from chorus.models import Agent, AgentNotFoundError, validate_agent_name
 
 if TYPE_CHECKING:
-    from chorus.config import GlobalConfig
+    from chorus.config import BotConfig, GlobalConfig
     from chorus.storage.db import Database
 
 logger = logging.getLogger("chorus.agent.manager")
@@ -25,10 +25,12 @@ class AgentManager:
         directory: AgentDirectory,
         db: Database,
         global_config: GlobalConfig | None = None,
+        bot_config: BotConfig | None = None,
     ) -> None:
         self._directory = directory
         self._db = db
         self._global_config = global_config
+        self._bot_config = bot_config
 
     async def create(
         self,
@@ -42,6 +44,25 @@ class AgentManager:
         agent_path = self._directory.create(name, overrides)
         agent_data = read_agent_json(agent_path / "agent.json")
         agent_data["channel_id"] = channel_id
+
+        # Refine system prompt via cheap LLM
+        if self._bot_config is not None:
+            from chorus.agent.prompt_refinement import refine_system_prompt
+
+            user_description = (overrides or {}).get("system_prompt")
+            template_prompt = agent_data.get("system_prompt", "")
+            try:
+                agent_data["system_prompt"] = await refine_system_prompt(
+                    agent_name=name,
+                    user_description=user_description,
+                    template_prompt=template_prompt,
+                    config=self._bot_config,
+                )
+            except Exception:
+                logger.exception("Prompt refinement failed for agent %s", name)
+                # If user provided an explicit override, use that; otherwise keep template
+                if user_description:
+                    agent_data["system_prompt"] = user_description
 
         # Apply global defaults for fields not explicitly overridden
         if self._global_config is not None:

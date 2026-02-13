@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from chorus.agent.directory import AgentDirectory
 from chorus.agent.manager import AgentManager
+from chorus.config import BotConfig
 from chorus.models import AgentExistsError, AgentNotFoundError, InvalidAgentNameError
 from chorus.storage.db import Database
 
@@ -124,3 +127,104 @@ class TestAgentConfigure:
     async def test_configure_nonexistent_raises(self, manager: AgentManager) -> None:
         with pytest.raises(AgentNotFoundError):
             await manager.configure("nonexistent", "model", "gpt-4o")
+
+
+class TestAgentInitRefinement:
+    """Integration tests for system prompt refinement during agent creation."""
+
+    @pytest.fixture
+    def bot_config(self, tmp_chorus_home: Path) -> BotConfig:
+        return BotConfig(
+            discord_token="test-token",
+            anthropic_api_key="sk-ant-test",
+            chorus_home=tmp_chorus_home,
+        )
+
+    @pytest.fixture
+    def manager_with_config(
+        self, agent_directory: AgentDirectory, db: Database, bot_config: BotConfig
+    ) -> AgentManager:
+        return AgentManager(agent_directory, db, bot_config=bot_config)
+
+    async def test_agent_init_calls_refinement(
+        self, manager_with_config: AgentManager
+    ) -> None:
+        """Verify refine_system_prompt is called during create()."""
+        with patch(
+            "chorus.agent.prompt_refinement.refine_system_prompt",
+            new_callable=AsyncMock,
+            return_value="Refined prompt for test-bot",
+        ) as mock_refine:
+            agent = await manager_with_config.create(
+                "test-bot", guild_id=GUILD_ID, channel_id=100
+            )
+            mock_refine.assert_called_once()
+            assert agent.system_prompt == "Refined prompt for test-bot"
+
+    async def test_agent_init_stores_refined_prompt_in_agent_json(
+        self, manager_with_config: AgentManager, tmp_chorus_home: Path
+    ) -> None:
+        """Verify refined prompt is written to the filesystem."""
+        with patch(
+            "chorus.agent.prompt_refinement.refine_system_prompt",
+            new_callable=AsyncMock,
+            return_value="You are a specialized documentation agent.",
+        ):
+            await manager_with_config.create(
+                "docs-bot", guild_id=GUILD_ID, channel_id=100
+            )
+
+        agent_json = tmp_chorus_home / "agents" / "docs-bot" / "agent.json"
+        data = json.loads(agent_json.read_text())
+        assert data["system_prompt"] == "You are a specialized documentation agent."
+
+    async def test_agent_init_succeeds_even_if_refinement_fails(
+        self, manager_with_config: AgentManager
+    ) -> None:
+        """If refine_system_prompt raises, agent is still created with template prompt."""
+        with patch(
+            "chorus.agent.prompt_refinement.refine_system_prompt",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("LLM exploded"),
+        ):
+            agent = await manager_with_config.create(
+                "test-bot", guild_id=GUILD_ID, channel_id=100
+            )
+        # Agent created successfully with template prompt
+        assert agent.name == "test-bot"
+        assert "general-purpose" in agent.system_prompt.lower()
+
+    async def test_agent_init_passes_user_description(
+        self, manager_with_config: AgentManager
+    ) -> None:
+        """User-provided system_prompt override is passed as user_description."""
+        with patch(
+            "chorus.agent.prompt_refinement.refine_system_prompt",
+            new_callable=AsyncMock,
+            return_value="Refined with user input",
+        ) as mock_refine:
+            await manager_with_config.create(
+                "code-bot",
+                guild_id=GUILD_ID,
+                channel_id=100,
+                overrides={"system_prompt": "A Python coding assistant"},
+            )
+            call_kwargs = mock_refine.call_args
+            assert call_kwargs[1]["user_description"] == "A Python coding assistant"
+
+    async def test_agent_init_uses_user_override_on_refinement_failure(
+        self, manager_with_config: AgentManager
+    ) -> None:
+        """If refinement fails and user provided a description, use it as-is."""
+        with patch(
+            "chorus.agent.prompt_refinement.refine_system_prompt",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("boom"),
+        ):
+            agent = await manager_with_config.create(
+                "test-bot",
+                guild_id=GUILD_ID,
+                channel_id=100,
+                overrides={"system_prompt": "My custom prompt"},
+            )
+        assert agent.system_prompt == "My custom prompt"

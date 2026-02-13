@@ -180,18 +180,22 @@ async def _execute_tool(
     sig = inspect.signature(tool.handler)
     kwargs = dict(arguments)
 
-    # Inject context parameters if the handler accepts them
-    if "workspace" in sig.parameters:
+    # Inject context parameters if the handler accepts them AND the LLM
+    # didn't already provide a value for that name.  This prevents
+    # collisions like edit_permissions' ``profile`` (a preset name string
+    # from the LLM) being overwritten by ``ctx.profile`` (a
+    # PermissionProfile object).
+    if "workspace" in sig.parameters and "workspace" not in arguments:
         kwargs["workspace"] = ctx.workspace
-    if "profile" in sig.parameters:
+    if "profile" in sig.parameters and "profile" not in arguments:
         kwargs["profile"] = ctx.profile
-    if "agent_name" in sig.parameters:
+    if "agent_name" in sig.parameters and "agent_name" not in arguments:
         kwargs["agent_name"] = ctx.agent_name
-    if "chorus_home" in sig.parameters:
+    if "chorus_home" in sig.parameters and "chorus_home" not in arguments:
         kwargs["chorus_home"] = ctx.chorus_home
-    if "is_admin" in sig.parameters:
+    if "is_admin" in sig.parameters and "is_admin" not in arguments:
         kwargs["is_admin"] = ctx.is_admin
-    if "db" in sig.parameters:
+    if "db" in sig.parameters and "db" not in arguments:
         kwargs["db"] = ctx.db
 
     result = await tool.handler(**kwargs)

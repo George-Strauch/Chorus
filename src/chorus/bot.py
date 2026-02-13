@@ -84,7 +84,9 @@ class ChorusBot(commands.Bot):
         directory = AgentDirectory(self.config.chorus_home, template_dir)
         directory.ensure_home()
         self.global_config = GlobalConfig.load(self.config.chorus_home / "config.json")
-        self.agent_manager = AgentManager(directory, self.db, global_config=self.global_config)
+        self.agent_manager = AgentManager(
+            directory, self.db, global_config=self.global_config, bot_config=self.config
+        )
 
         # Auto-discover and load all command cogs
         for module_info in pkgutil.iter_modules(chorus.commands.__path__):
