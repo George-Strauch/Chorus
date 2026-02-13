@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import aiosqlite
 
@@ -20,16 +21,20 @@ CREATE TABLE IF NOT EXISTS agents (
     model TEXT,
     permissions TEXT NOT NULL DEFAULT 'standard',
     created_at TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'active'
+    status TEXT NOT NULL DEFAULT 'active',
+    last_clear_time TEXT
 );
 
 CREATE TABLE IF NOT EXISTS sessions (
     id TEXT PRIMARY KEY,
     agent_name TEXT NOT NULL REFERENCES agents(name),
     description TEXT,
+    summary TEXT,
     saved_at TEXT NOT NULL,
     message_count INTEGER,
-    file_path TEXT NOT NULL
+    file_path TEXT NOT NULL,
+    window_start TEXT,
+    window_end TEXT
 );
 
 CREATE TABLE IF NOT EXISTS audit_log (
@@ -62,6 +67,21 @@ CREATE TABLE IF NOT EXISTS thread_steps (
 
 CREATE INDEX IF NOT EXISTS idx_thread_steps_agent_thread
     ON thread_steps(agent_name, thread_id);
+
+CREATE TABLE IF NOT EXISTS messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_name TEXT NOT NULL,
+    thread_id INTEGER,
+    role TEXT NOT NULL,
+    content TEXT,
+    tool_calls TEXT,
+    tool_call_id TEXT,
+    timestamp TEXT NOT NULL,
+    discord_message_id INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS idx_messages_agent_time
+    ON messages(agent_name, timestamp);
 """
 
 
@@ -73,12 +93,30 @@ class Database:
         self._conn: aiosqlite.Connection | None = None
 
     async def init(self) -> None:
-        """Create parent directories, open connection, and run schema."""
+        """Create parent directories, open connection, run schema and migrations."""
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = await aiosqlite.connect(self._path)
         await self._conn.executescript(SCHEMA_SQL)
         await self._conn.commit()
+        await self._migrate()
         logger.info("Database initialized at %s", self._path)
+
+    async def _migrate(self) -> None:
+        """Run idempotent schema migrations for columns added after initial release."""
+        conn = self.connection
+        migrations: list[tuple[str, str, str]] = [
+            ("agents", "last_clear_time", "ALTER TABLE agents ADD COLUMN last_clear_time TEXT"),
+            ("sessions", "summary", "ALTER TABLE sessions ADD COLUMN summary TEXT"),
+            ("sessions", "window_start", "ALTER TABLE sessions ADD COLUMN window_start TEXT"),
+            ("sessions", "window_end", "ALTER TABLE sessions ADD COLUMN window_end TEXT"),
+        ]
+        for table, column, sql in migrations:
+            try:
+                await conn.execute(f"SELECT {column} FROM {table} LIMIT 0")  # noqa: S608
+            except aiosqlite.OperationalError:
+                await conn.execute(sql)
+                logger.info("Migration: added %s.%s", table, column)
+        await conn.commit()
 
     async def close(self) -> None:
         """Close the database connection."""
@@ -226,3 +264,197 @@ class Database:
             }
             for row in rows
         ]
+
+    # ── Message persistence ──────────────────────────────────────────────
+
+    async def persist_message(
+        self,
+        agent_name: str,
+        role: str,
+        timestamp: str,
+        *,
+        thread_id: int | None = None,
+        content: str | None = None,
+        tool_calls: list[Any] | None = None,
+        tool_call_id: str | None = None,
+        discord_message_id: int | None = None,
+    ) -> None:
+        """Insert a message row."""
+        tool_calls_json = json.dumps(tool_calls) if tool_calls else None
+        await self.connection.execute(
+            "INSERT INTO messages "
+            "(agent_name, thread_id, role, content, tool_calls, tool_call_id, "
+            "timestamp, discord_message_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                agent_name,
+                thread_id,
+                role,
+                content,
+                tool_calls_json,
+                tool_call_id,
+                timestamp,
+                discord_message_id,
+            ),
+        )
+        await self.connection.commit()
+
+    async def get_messages_since(
+        self,
+        agent_name: str,
+        since: str,
+        *,
+        thread_id: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return messages after a given ISO timestamp, ordered by time."""
+        if thread_id is not None:
+            query = (
+                "SELECT id, agent_name, thread_id, role, content, tool_calls, "
+                "tool_call_id, timestamp, discord_message_id "
+                "FROM messages WHERE agent_name = ? AND timestamp > ? AND thread_id = ? "
+                "ORDER BY timestamp ASC"
+            )
+            params: tuple[Any, ...] = (agent_name, since, thread_id)
+        else:
+            query = (
+                "SELECT id, agent_name, thread_id, role, content, tool_calls, "
+                "tool_call_id, timestamp, discord_message_id "
+                "FROM messages WHERE agent_name = ? AND timestamp > ? "
+                "ORDER BY timestamp ASC"
+            )
+            params = (agent_name, since)
+        async with self.connection.execute(query, params) as cursor:
+            rows = await cursor.fetchall()
+        return [self._row_to_message(row) for row in rows]
+
+    async def get_all_messages(self, agent_name: str) -> list[dict[str, Any]]:
+        """Return all messages for an agent, ordered by time."""
+        async with self.connection.execute(
+            "SELECT id, agent_name, thread_id, role, content, tool_calls, "
+            "tool_call_id, timestamp, discord_message_id "
+            "FROM messages WHERE agent_name = ? ORDER BY timestamp ASC",
+            (agent_name,),
+        ) as cursor:
+            rows = await cursor.fetchall()
+        return [self._row_to_message(row) for row in rows]
+
+    @staticmethod
+    def _row_to_message(row: Any) -> dict[str, Any]:
+        """Convert a messages table row tuple to a dict."""
+        tool_calls_raw = row[5]
+        tool_calls = json.loads(tool_calls_raw) if tool_calls_raw else None
+        return {
+            "id": row[0],
+            "agent_name": row[1],
+            "thread_id": row[2],
+            "role": row[3],
+            "content": row[4],
+            "tool_calls": tool_calls,
+            "tool_call_id": row[6],
+            "timestamp": row[7],
+            "discord_message_id": row[8],
+        }
+
+    # ── Clear time ───────────────────────────────────────────────────────
+
+    async def get_last_clear_time(self, agent_name: str) -> str | None:
+        """Get the last_clear_time for an agent, or None."""
+        async with self.connection.execute(
+            "SELECT last_clear_time FROM agents WHERE name = ?",
+            (agent_name,),
+        ) as cursor:
+            row = await cursor.fetchone()
+        if row is None:
+            return None
+        return row[0]  # type: ignore[no-any-return]
+
+    async def set_last_clear_time(self, agent_name: str, clear_time: str) -> None:
+        """Set the last_clear_time for an agent."""
+        await self.connection.execute(
+            "UPDATE agents SET last_clear_time = ? WHERE name = ?",
+            (clear_time, agent_name),
+        )
+        await self.connection.commit()
+
+    # ── Session snapshot storage ─────────────────────────────────────────
+
+    async def save_session(
+        self,
+        session_id: str,
+        agent_name: str,
+        description: str,
+        summary: str,
+        saved_at: str,
+        message_count: int,
+        file_path: str,
+        window_start: str,
+        window_end: str,
+    ) -> None:
+        """Insert a session snapshot row."""
+        await self.connection.execute(
+            "INSERT INTO sessions "
+            "(id, agent_name, description, summary, saved_at, message_count, "
+            "file_path, window_start, window_end) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                session_id,
+                agent_name,
+                description,
+                summary,
+                saved_at,
+                message_count,
+                file_path,
+                window_start,
+                window_end,
+            ),
+        )
+        await self.connection.commit()
+
+    async def list_sessions(
+        self, agent_name: str, limit: int = 50
+    ) -> list[dict[str, Any]]:
+        """List session snapshots for an agent, most recent first."""
+        async with self.connection.execute(
+            "SELECT id, agent_name, description, summary, saved_at, message_count, "
+            "file_path, window_start, window_end "
+            "FROM sessions WHERE agent_name = ? ORDER BY saved_at DESC LIMIT ?",
+            (agent_name, limit),
+        ) as cursor:
+            rows = await cursor.fetchall()
+        return [
+            {
+                "session_id": row[0],
+                "agent_name": row[1],
+                "description": row[2],
+                "summary": row[3],
+                "saved_at": row[4],
+                "message_count": row[5],
+                "file_path": row[6],
+                "window_start": row[7],
+                "window_end": row[8],
+            }
+            for row in rows
+        ]
+
+    async def get_session(self, session_id: str) -> dict[str, Any] | None:
+        """Fetch a single session by ID, or None."""
+        async with self.connection.execute(
+            "SELECT id, agent_name, description, summary, saved_at, message_count, "
+            "file_path, window_start, window_end "
+            "FROM sessions WHERE id = ?",
+            (session_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+        if row is None:
+            return None
+        return {
+            "session_id": row[0],
+            "agent_name": row[1],
+            "description": row[2],
+            "summary": row[3],
+            "saved_at": row[4],
+            "message_count": row[5],
+            "file_path": row[6],
+            "window_start": row[7],
+            "window_end": row[8],
+        }
