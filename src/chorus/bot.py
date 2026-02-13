@@ -13,15 +13,20 @@ from discord.ext import commands
 from dotenv import load_dotenv
 
 import chorus.commands
-from chorus.agent.context import ContextManager
+from chorus.agent.context import ContextManager, build_llm_context
 from chorus.agent.directory import AgentDirectory
 from chorus.agent.manager import AgentManager
-from chorus.agent.threads import ThreadManager, ThreadStatus
+from chorus.agent.threads import ExecutionThread, ThreadManager, ThreadRunner, ThreadStatus
 from chorus.config import BotConfig
+from chorus.llm.providers import AnthropicProvider, OpenAIProvider
+from chorus.llm.tool_loop import ToolExecutionContext, run_tool_loop
+from chorus.permissions.engine import get_preset
 from chorus.storage.db import Database
+from chorus.tools.registry import create_default_registry
 
 if TYPE_CHECKING:
     from chorus.agent.message_queue import ChannelMessageQueue
+    from chorus.models import Agent
 
 logger = logging.getLogger("chorus.bot")
 
@@ -168,9 +173,90 @@ class ChorusBot(commands.Bot):
             discord_message_id=message.id,
         )
 
-        # Start if not running (uses _default_runner until TODO 008 wires the real LLM loop)
+        # Start if not running — wire the LLM tool loop as the runner
         if thread.status != ThreadStatus.RUNNING:
-            tm.start_thread(thread)
+            agent = await self.agent_manager.get_agent_by_channel(message.channel.id)
+            if agent is None:
+                return
+
+            runner = self._make_llm_runner(agent, tm, cm, message)
+            tm.start_thread(thread, runner=runner)
+
+
+    def _make_llm_runner(
+        self,
+        agent: Agent,
+        tm: ThreadManager,
+        cm: ContextManager,
+        message: discord.Message,
+    ) -> ThreadRunner:
+        """Build a ThreadRunner closure that runs the LLM tool loop."""
+
+        async def runner(thread: ExecutionThread) -> None:
+            # Resolve permission profile
+            profile = get_preset(agent.permissions)
+
+            # Choose provider based on model name
+            model = agent.model or "claude-sonnet-4-20250514"
+            provider: AnthropicProvider | OpenAIProvider
+            if model.startswith(("gpt-", "o1-", "o3-", "o4-")):
+                if not self.config.openai_api_key:
+                    await message.channel.send("No OpenAI API key configured.")
+                    return
+                provider = OpenAIProvider(self.config.openai_api_key, model)
+            else:
+                if not self.config.anthropic_api_key:
+                    await message.channel.send("No Anthropic API key configured.")
+                    return
+                provider = AnthropicProvider(self.config.anthropic_api_key, model)
+
+            # Build context
+            agent_dir = self.agent_manager._directory._agents_dir / agent.name
+            docs_dir = agent_dir / "docs"
+            workspace = agent_dir / "workspace"
+
+            ctx = ToolExecutionContext(
+                workspace=workspace,
+                profile=profile,
+                agent_name=agent.name,
+            )
+
+            llm_messages = await build_llm_context(
+                agent=agent,
+                thread_id=thread.id,
+                context_manager=cm,
+                thread_manager=tm,
+                agent_docs_dir=docs_dir,
+            )
+
+            registry = create_default_registry()
+
+            # Run the tool loop
+            result = await run_tool_loop(
+                provider=provider,
+                messages=llm_messages,
+                tools=registry,
+                ctx=ctx,
+                system_prompt=agent.system_prompt,
+                model=model,
+            )
+
+            # Send response to Discord
+            if result.content:
+                # Truncate to Discord's 2000 char limit
+                content = result.content[:2000]
+                bot_msg = await message.channel.send(content, reference=message)
+                tm.register_bot_message(bot_msg.id, thread.id)
+
+                # Persist assistant message
+                await cm.persist_message(
+                    role="assistant",
+                    content=result.content,
+                    thread_id=thread.id,
+                    discord_message_id=bot_msg.id,
+                )
+
+        return runner
 
 
 def main() -> None:
