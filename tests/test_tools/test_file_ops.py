@@ -218,6 +218,21 @@ class TestView:
         with pytest.raises(FileNotFoundInWorkspaceError):
             await view(workspace_dir, "does_not_exist.txt")
 
+    @pytest.mark.asyncio
+    async def test_view_directory_returns_listing(self, workspace_dir: Path) -> None:
+        result = await view(workspace_dir, "src")
+        assert result.success is True
+        assert result.content_snippet is not None
+        assert "app.py" in result.content_snippet
+        assert "Directory listing" in result.content_snippet
+
+    @pytest.mark.asyncio
+    async def test_view_empty_directory(self, workspace_dir: Path) -> None:
+        (workspace_dir / "emptydir").mkdir()
+        result = await view(workspace_dir, "emptydir")
+        assert result.success is True
+        assert "(empty directory)" in result.content_snippet
+
 
 # ---------------------------------------------------------------------------
 # Path traversal (dedicated)

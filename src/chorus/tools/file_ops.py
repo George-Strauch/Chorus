@@ -200,6 +200,16 @@ async def view(
     if not resolved.exists():
         raise FileNotFoundInWorkspaceError(f"File not found: {path}")
 
+    if resolved.is_dir():
+        entries = sorted(p.name + ("/" if p.is_dir() else "") for p in resolved.iterdir())
+        listing = "\n".join(entries) if entries else "(empty directory)"
+        return FileResult(
+            path=path,
+            action="view",
+            success=True,
+            content_snippet=f"Directory listing of {path}/:\n{listing}",
+        )
+
     # Binary check
     raw = resolved.read_bytes()
     check_chunk = raw[:_BINARY_CHECK_SIZE]

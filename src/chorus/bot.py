@@ -27,6 +27,7 @@ from chorus.llm.tool_loop import (
     ToolLoopEventType,
     run_tool_loop,
 )
+from chorus.permissions.ask_ui import ask_user_permission
 from chorus.permissions.engine import get_preset
 from chorus.storage.db import Database
 from chorus.tools.registry import create_default_registry
@@ -430,6 +431,23 @@ class ChorusBot(commands.Bot):
                     updates["current_step"] = f"Thinking (call {event.iteration})"
                 await status_view.update(**updates)
 
+            # Build ask_callback for ASK permission prompts
+            async def _ask_callback(tool_name: str, arguments: str) -> bool:
+                from chorus.llm.tool_loop import _build_action_string
+                import json as _json
+                try:
+                    args = _json.loads(arguments)
+                except (ValueError, TypeError):
+                    args = {}
+                action = _build_action_string(tool_name, args)
+                return await ask_user_permission(
+                    channel=message.channel,  # type: ignore[arg-type]
+                    requester_id=message.author.id,
+                    action_string=action,
+                    tool_name=tool_name,
+                    arguments=arguments,
+                )
+
             try:
                 # Run the tool loop
                 result = await run_tool_loop(
@@ -440,6 +458,7 @@ class ChorusBot(commands.Bot):
                     system_prompt=agent.system_prompt,
                     model=model,
                     max_iterations=self.global_config.max_tool_loop_iterations,
+                    ask_callback=_ask_callback,
                     inject_queue=thread.inject_queue,
                     on_event=on_event,
                 )
