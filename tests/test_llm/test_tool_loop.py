@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock
@@ -549,6 +550,157 @@ class TestToolLoopUsage:
 
         assert result.total_usage.input_tokens == 10
         assert result.total_usage.output_tokens == 5
+
+
+# ---------------------------------------------------------------------------
+# Context injection (workspace, profile, agent_name)
+# ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# Inject queue (message interjection into running loop)
+# ---------------------------------------------------------------------------
+
+
+class TestToolLoopInjection:
+    @pytest.mark.asyncio
+    async def test_injected_message_appears_in_context(self, tmp_path: Path) -> None:
+        """A message queued in inject_queue appears in the next LLM call."""
+        handler = AsyncMock(return_value={"ok": True})
+        registry = _make_registry(("my_tool", handler))
+
+        inject_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+
+        # Provider: first call returns tool use, second call returns text.
+        # We inject a message before the second call.
+        call_count = 0
+
+        class InjectingProvider:
+            @property
+            def provider_name(self) -> str:
+                return "fake"
+
+            async def chat(
+                self,
+                messages: list[dict[str, Any]],
+                tools: list[dict[str, Any]] | None = None,
+                model: str | None = None,
+            ) -> LLMResponse:
+                nonlocal call_count
+                call_count += 1
+                if call_count == 1:
+                    return _tool_response([
+                        ToolCall(id="tc_1", name="my_tool", arguments={"arg": "x"})
+                    ])
+                # On second call, check that the injected message is present
+                user_msgs = [m for m in messages if m.get("role") == "user"]
+                assert any("interjected" in m.get("content", "") for m in user_msgs), (
+                    "Injected message not found in messages"
+                )
+                return _text_response("Done with injection.")
+
+        # Queue the message before the loop starts — it'll be drained on iteration 2
+        inject_queue.put_nowait({"role": "user", "content": "interjected message"})
+
+        ctx = _make_ctx(tmp_path)
+        result = await run_tool_loop(
+            provider=InjectingProvider(),
+            messages=[{"role": "user", "content": "initial"}],
+            tools=registry,
+            ctx=ctx,
+            system_prompt="",
+            model="test",
+            inject_queue=inject_queue,
+        )
+        assert result.content == "Done with injection."
+
+    @pytest.mark.asyncio
+    async def test_no_injection_when_queue_is_none(self, tmp_path: Path) -> None:
+        """inject_queue=None works fine (backward compat)."""
+        provider = FakeProvider([_text_response("Hi")])
+        ctx = _make_ctx(tmp_path)
+
+        result = await run_tool_loop(
+            provider=provider,
+            messages=[{"role": "user", "content": "Hi"}],
+            tools=_make_registry(),
+            ctx=ctx,
+            system_prompt="",
+            model="test",
+            inject_queue=None,
+        )
+        assert result.content == "Hi"
+
+    @pytest.mark.asyncio
+    async def test_no_injection_when_queue_empty(self, tmp_path: Path) -> None:
+        """Empty queue doesn't alter messages."""
+        inject_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+        provider = FakeProvider([_text_response("Normal")])
+        ctx = _make_ctx(tmp_path)
+
+        result = await run_tool_loop(
+            provider=provider,
+            messages=[{"role": "user", "content": "Hi"}],
+            tools=_make_registry(),
+            ctx=ctx,
+            system_prompt="",
+            model="test",
+            inject_queue=inject_queue,
+        )
+        assert result.content == "Normal"
+        # Provider should have received exactly the system + user message
+        msgs = provider.call_log[0]["messages"]
+        user_msgs = [m for m in msgs if m.get("role") == "user"]
+        assert len(user_msgs) == 1
+
+    @pytest.mark.asyncio
+    async def test_multiple_injected_messages_in_order(self, tmp_path: Path) -> None:
+        """3 queued messages appear in FIFO order."""
+        inject_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+        inject_queue.put_nowait({"role": "user", "content": "first"})
+        inject_queue.put_nowait({"role": "user", "content": "second"})
+        inject_queue.put_nowait({"role": "user", "content": "third"})
+
+        handler = AsyncMock(return_value={"ok": True})
+        registry = _make_registry(("my_tool", handler))
+
+        class CheckingProvider:
+            @property
+            def provider_name(self) -> str:
+                return "fake"
+
+            async def chat(
+                self,
+                messages: list[dict[str, Any]],
+                tools: list[dict[str, Any]] | None = None,
+                model: str | None = None,
+            ) -> LLMResponse:
+                # All three injected messages should appear in order
+                user_contents = [
+                    m["content"] for m in messages
+                    if m.get("role") == "user"
+                ]
+                # Should have: "initial", "first", "second", "third"
+                assert "first" in user_contents
+                assert "second" in user_contents
+                assert "third" in user_contents
+                idx_first = user_contents.index("first")
+                idx_second = user_contents.index("second")
+                idx_third = user_contents.index("third")
+                assert idx_first < idx_second < idx_third
+                return _text_response("All injected.")
+
+        ctx = _make_ctx(tmp_path)
+        result = await run_tool_loop(
+            provider=CheckingProvider(),
+            messages=[{"role": "user", "content": "initial"}],
+            tools=registry,
+            ctx=ctx,
+            system_prompt="",
+            model="test",
+            inject_queue=inject_queue,
+        )
+        assert result.content == "All injected."
 
 
 # ---------------------------------------------------------------------------

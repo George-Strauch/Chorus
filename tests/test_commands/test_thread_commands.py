@@ -107,6 +107,89 @@ class TestThreadKill:
         assert "not found" in msg.lower() or "no thread" in msg.lower()
 
 
+class TestBreakContext:
+    async def test_break_context_detaches_main(self, mock_bot: MagicMock) -> None:
+        tm = ThreadManager("test-agent")
+        thread = tm.create_thread({"role": "user", "content": "hello"}, is_main=True)
+        assert tm.get_main_thread() is thread
+
+        mock_bot._thread_managers = {"test-agent": tm}
+        mock_bot._channel_to_agent = {987654321: "test-agent"}
+
+        cog = ThreadCog(mock_bot)
+        interaction = _make_interaction(mock_bot)
+        await cog.break_context.callback(cog, interaction)
+
+        assert tm.get_main_thread() is None
+        interaction.response.send_message.assert_called_once()
+
+    async def test_break_context_no_agent(self, mock_bot: MagicMock) -> None:
+        mock_bot._thread_managers = {}
+        mock_bot._channel_to_agent = {}
+
+        cog = ThreadCog(mock_bot)
+        interaction = _make_interaction(mock_bot)
+        await cog.break_context.callback(cog, interaction)
+
+        interaction.response.send_message.assert_called_once()
+        call_kwargs = interaction.response.send_message.call_args
+        assert call_kwargs.kwargs.get("ephemeral") is True
+
+    async def test_break_context_no_main_thread(self, mock_bot: MagicMock) -> None:
+        tm = ThreadManager("test-agent")
+        mock_bot._thread_managers = {"test-agent": tm}
+        mock_bot._channel_to_agent = {987654321: "test-agent"}
+
+        cog = ThreadCog(mock_bot)
+        interaction = _make_interaction(mock_bot)
+        await cog.break_context.callback(cog, interaction)
+
+        interaction.response.send_message.assert_called_once()
+        msg = interaction.response.send_message.call_args[0][0]
+        assert "no main thread" in msg.lower() or "no active" in msg.lower()
+
+    async def test_break_context_response_mentions_old_thread(
+        self, mock_bot: MagicMock
+    ) -> None:
+        tm = ThreadManager("test-agent")
+        thread = tm.create_thread({"role": "user", "content": "hello"}, is_main=True)
+
+        mock_bot._thread_managers = {"test-agent": tm}
+        mock_bot._channel_to_agent = {987654321: "test-agent"}
+
+        cog = ThreadCog(mock_bot)
+        interaction = _make_interaction(mock_bot)
+        await cog.break_context.callback(cog, interaction)
+
+        msg = interaction.response.send_message.call_args[0][0]
+        assert str(thread.id) in msg
+
+    async def test_break_context_running_thread_continues(
+        self, mock_bot: MagicMock
+    ) -> None:
+        import asyncio
+
+        tm = ThreadManager("test-agent")
+        thread = tm.create_thread({"role": "user", "content": "hello"}, is_main=True)
+
+        async def slow(t: ExecutionThread) -> None:
+            await asyncio.sleep(100)
+
+        tm.start_thread(thread, runner=slow)
+
+        mock_bot._thread_managers = {"test-agent": tm}
+        mock_bot._channel_to_agent = {987654321: "test-agent"}
+
+        cog = ThreadCog(mock_bot)
+        interaction = _make_interaction(mock_bot)
+        await cog.break_context.callback(cog, interaction)
+
+        # Main thread detached but still running
+        assert tm.get_main_thread() is None
+        assert thread.status == ThreadStatus.RUNNING
+        await tm.kill_all()
+
+
 class TestThreadHistory:
     async def test_history_shows_steps(self, mock_bot: MagicMock) -> None:
         tm = ThreadManager("test-agent")

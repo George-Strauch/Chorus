@@ -6,6 +6,8 @@ import asyncio
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock
 
+import pytest
+
 from chorus.agent.threads import (
     ExecutionThread,
     ThreadManager,
@@ -427,3 +429,83 @@ class TestListMethods:
         assert active[0].id == t2.id
         all_threads = thread_manager.list_all()
         assert len(all_threads) == 2
+
+
+# ── Main Thread ─────────────────────────────────────────────────────────────
+
+
+class TestMainThread:
+    def test_no_main_thread_initially(self, thread_manager: ThreadManager) -> None:
+        assert thread_manager.get_main_thread() is None
+
+    def test_set_main_thread(self, thread_manager: ThreadManager) -> None:
+        thread = thread_manager.create_thread({"role": "user", "content": "hello"})
+        thread_manager.set_main_thread(thread.id)
+        assert thread_manager.get_main_thread() is thread
+
+    def test_set_main_thread_invalid_raises(self, thread_manager: ThreadManager) -> None:
+        with pytest.raises(ValueError, match="Unknown thread"):
+            thread_manager.set_main_thread(999)
+
+    def test_break_main_thread(self, thread_manager: ThreadManager) -> None:
+        thread = thread_manager.create_thread({"role": "user", "content": "hello"})
+        thread_manager.set_main_thread(thread.id)
+        thread_manager.break_main_thread()
+        assert thread_manager.get_main_thread() is None
+
+    def test_break_when_no_main_is_noop(self, thread_manager: ThreadManager) -> None:
+        thread_manager.break_main_thread()  # should not raise
+        assert thread_manager.get_main_thread() is None
+
+    def test_main_thread_survives_new_threads(self, thread_manager: ThreadManager) -> None:
+        t1 = thread_manager.create_thread({"role": "user", "content": "a"})
+        thread_manager.set_main_thread(t1.id)
+        thread_manager.create_thread({"role": "user", "content": "b"})
+        thread_manager.create_thread({"role": "user", "content": "c"})
+        assert thread_manager.get_main_thread() is t1
+
+    def test_create_thread_with_is_main(self, thread_manager: ThreadManager) -> None:
+        thread = thread_manager.create_thread(
+            {"role": "user", "content": "hello"}, is_main=True
+        )
+        assert thread_manager.get_main_thread() is thread
+
+    def test_get_main_thread_after_cleanup(self, thread_manager: ThreadManager) -> None:
+        thread = thread_manager.create_thread(
+            {"role": "user", "content": "hello"}, is_main=True
+        )
+        thread.status = ThreadStatus.COMPLETED
+        thread.completed_at = datetime(2020, 1, 1, tzinfo=UTC)
+        thread_manager.cleanup_completed()
+        # Thread was cleaned up — main should reset
+        assert thread_manager.get_main_thread() is None
+
+    def test_completed_main_thread_still_accessible(
+        self, thread_manager: ThreadManager
+    ) -> None:
+        thread = thread_manager.create_thread(
+            {"role": "user", "content": "hello"}, is_main=True
+        )
+        thread.status = ThreadStatus.COMPLETED
+        thread.completed_at = datetime.now(UTC)
+        # Not cleaned up yet — should still be accessible
+        assert thread_manager.get_main_thread() is thread
+
+
+# ── Inject Queue ────────────────────────────────────────────────────────────
+
+
+class TestInjectQueue:
+    def test_inject_queue_exists(self, thread_manager: ThreadManager) -> None:
+        thread = thread_manager.create_thread({"role": "user", "content": "hello"})
+        assert thread.inject_queue is not None
+        assert thread.inject_queue.empty()
+
+    async def test_inject_queue_put_get(self, thread_manager: ThreadManager) -> None:
+        thread = thread_manager.create_thread({"role": "user", "content": "hello"})
+        msg = {"role": "user", "content": "injected"}
+        thread.inject_queue.put_nowait(msg)
+        assert not thread.inject_queue.empty()
+        got = thread.inject_queue.get_nowait()
+        assert got == msg
+        assert thread.inject_queue.empty()
