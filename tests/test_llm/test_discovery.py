@@ -215,3 +215,60 @@ class TestValidateAndDiscover:
         result = await validate_and_discover(tmp_path)
         # No providers should have valid keys
         assert result["providers"] == {}
+
+
+# ---------------------------------------------------------------------------
+# Integration: validate_and_discover cache file and per-provider status
+# ---------------------------------------------------------------------------
+
+
+class TestValidateAndDiscoverIntegration:
+    @pytest.mark.asyncio
+    async def test_validate_keys_command_updates_cache_file(self, tmp_path: Path) -> None:
+        """Calling validate_and_discover writes a cache file that can be read back."""
+        mock_anth_client = MagicMock()
+        mock_anth_client.messages = MagicMock()
+        mock_anth_client.messages.create = AsyncMock(return_value=MagicMock())
+
+        await validate_and_discover(
+            tmp_path,
+            anthropic_key="sk-ant-test",
+            _anthropic_client=mock_anth_client,
+        )
+
+        cache_file = tmp_path / "available_models.json"
+        assert cache_file.exists()
+        cached = json.loads(cache_file.read_text())
+        assert "providers" in cached
+        assert "anthropic" in cached["providers"]
+        assert cached["providers"]["anthropic"]["valid"] is True
+        assert len(cached["providers"]["anthropic"]["models"]) > 0
+
+    @pytest.mark.asyncio
+    async def test_validate_keys_reports_per_provider_status(self, tmp_path: Path) -> None:
+        """With both keys, result has separate status for each provider."""
+        mock_anth_client = MagicMock()
+        mock_anth_client.messages = MagicMock()
+        mock_anth_client.messages.create = AsyncMock(return_value=MagicMock())
+
+        mock_oai_client = MagicMock()
+        mock_oai_client.models = MagicMock()
+        model1 = MagicMock()
+        model1.id = "gpt-4o"
+        mock_response = MagicMock()
+        mock_response.data = [model1]
+        mock_oai_client.models.list = AsyncMock(return_value=mock_response)
+
+        result = await validate_and_discover(
+            tmp_path,
+            anthropic_key="sk-ant-test",
+            openai_key="sk-oai-test",
+            _anthropic_client=mock_anth_client,
+            _openai_client=mock_oai_client,
+        )
+
+        assert "anthropic" in result["providers"]
+        assert "openai" in result["providers"]
+        assert result["providers"]["anthropic"]["valid"] is True
+        assert result["providers"]["openai"]["valid"] is True
+        assert "gpt-4o" in result["providers"]["openai"]["models"]

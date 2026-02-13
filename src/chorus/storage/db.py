@@ -355,6 +355,17 @@ class Database:
             "discord_message_id": row[8],
         }
 
+    # ── Agent channel update ────────────────────────────────────────────
+
+    async def update_agent_channel(self, name: str, new_channel_id: int) -> None:
+        """Update the channel_id for an agent."""
+        await self.connection.execute(
+            "UPDATE agents SET channel_id = ? WHERE name = ?",
+            (new_channel_id, name),
+        )
+        await self.connection.commit()
+        logger.info("Updated agent %s channel_id to %d", name, new_channel_id)
+
     # ── Clear time ───────────────────────────────────────────────────────
 
     async def get_last_clear_time(self, agent_name: str) -> str | None:
@@ -435,6 +446,39 @@ class Database:
             }
             for row in rows
         ]
+
+    # ── Self-edit audit logging ────────────────────────────────────────
+
+    async def log_self_edit(
+        self,
+        agent_name: str,
+        edit_type: str,
+        old_value: str,
+        new_value: str,
+        user_id: int | None = None,
+    ) -> None:
+        """Log a self-edit operation to the audit table."""
+        from datetime import UTC, datetime
+
+        detail = json.dumps({
+            "edit_type": edit_type,
+            "old_value": old_value[:500],
+            "new_value": new_value[:500],
+        })
+        await self.connection.execute(
+            "INSERT INTO audit_log "
+            "(agent_name, timestamp, action_string, decision, user_id, detail) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                agent_name,
+                datetime.now(UTC).isoformat(),
+                f"tool:self_edit:{edit_type}",
+                "allow",
+                user_id,
+                detail,
+            ),
+        )
+        await self.connection.commit()
 
     async def get_session(self, session_id: str) -> dict[str, Any] | None:
         """Fetch a single session by ID, or None."""

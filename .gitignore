@@ -23,6 +23,7 @@ ENV/
 
 # Chorus runtime data
 .chorus-agents/
+data/
 *.db
 
 # OS

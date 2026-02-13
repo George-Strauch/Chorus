@@ -102,9 +102,21 @@ class TestPresetStandard:
         p = get_preset("standard")
         assert check("tool:git:commit -m 'init'", p) is PermissionResult.ALLOW
 
-    def test_denies_self_edit_system_prompt(self) -> None:
+    def test_asks_self_edit_system_prompt(self) -> None:
         p = get_preset("standard")
-        assert check("tool:self_edit:system_prompt", p) is PermissionResult.DENY
+        assert check("tool:self_edit:system_prompt", p) is PermissionResult.ASK
+
+    def test_allows_self_edit_docs(self) -> None:
+        p = get_preset("standard")
+        assert check("tool:self_edit:docs README.md", p) is PermissionResult.ALLOW
+
+    def test_asks_self_edit_permissions(self) -> None:
+        p = get_preset("standard")
+        assert check("tool:self_edit:permissions open", p) is PermissionResult.ASK
+
+    def test_asks_self_edit_model(self) -> None:
+        p = get_preset("standard")
+        assert check("tool:self_edit:model gpt-4o", p) is PermissionResult.ASK
 
 
 class TestPresetLocked:

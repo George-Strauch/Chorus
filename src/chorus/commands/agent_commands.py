@@ -26,6 +26,13 @@ class ConfirmDestroyView(discord.ui.View):
         self, interaction: discord.Interaction, button: discord.ui.Button[ConfirmDestroyView]
     ) -> None:
         try:
+            # Look up agent to get channel_id before destroying
+            agent_data = await self._bot.agent_manager._db.get_agent(self._name)  # type: ignore[attr-defined]
+            if agent_data and interaction.guild:
+                channel = interaction.guild.get_channel(int(agent_data["channel_id"]))
+                if channel is not None:
+                    await channel.delete(reason=f"Agent {self._name} destroyed")
+
             await self._bot.agent_manager.destroy(self._name)  # type: ignore[attr-defined]
             await interaction.response.send_message(
                 f"Agent **{self._name}** destroyed.", ephemeral=True

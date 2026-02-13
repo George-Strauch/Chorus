@@ -96,6 +96,15 @@ class AgentDirectory:
             return agent_dir
         return None
 
+    def update_channel_id(self, name: str, channel_id: int) -> None:
+        """Update the channel_id in an agent's agent.json."""
+        agent_dir = self._agents_dir / name
+        config_path = agent_dir / "agent.json"
+        data = read_agent_json(config_path)
+        data["channel_id"] = channel_id
+        write_agent_json(config_path, data)
+        logger.info("Updated agent %s agent.json channel_id to %d", name, channel_id)
+
     def list_all(self) -> list[str]:
         """Return a sorted list of all agent names."""
         if not self._agents_dir.exists():

@@ -52,6 +52,10 @@ _TOOL_TO_CATEGORY: dict[str, str] = {
     "git_diff": "git",
     "git_log": "git",
     "git_merge_request": "git",
+    "self_edit_system_prompt": "self_edit",
+    "self_edit_docs": "self_edit",
+    "self_edit_permissions": "self_edit",
+    "self_edit_model": "self_edit",
 }
 
 
@@ -72,6 +76,19 @@ def _build_action_string(tool_name: str, arguments: dict[str, Any]) -> str:
         # Strip "git_" prefix for the operation name
         op = tool_name.removeprefix("git_")
         detail = f"{op} {json.dumps(arguments)}"
+    elif category == "self_edit":
+        # e.g. "system_prompt", "docs README.md", "permissions open", "model gpt-4o"
+        sub = tool_name.removeprefix("self_edit_")
+        if sub == "docs":
+            detail = f"docs {arguments.get('path', '')}"
+        elif sub == "system_prompt":
+            detail = "system_prompt"
+        elif sub == "permissions":
+            detail = f"permissions {arguments.get('profile', '')}"
+        elif sub == "model":
+            detail = f"model {arguments.get('model', '')}"
+        else:
+            detail = sub
     else:
         detail = str(arguments)
 
@@ -90,6 +107,9 @@ class ToolExecutionContext:
     workspace: Path
     profile: PermissionProfile
     agent_name: str
+    chorus_home: Path | None = None
+    is_admin: bool = False
+    db: Any = None
 
 
 @dataclass
@@ -129,6 +149,12 @@ async def _execute_tool(
         kwargs["profile"] = ctx.profile
     if "agent_name" in sig.parameters:
         kwargs["agent_name"] = ctx.agent_name
+    if "chorus_home" in sig.parameters:
+        kwargs["chorus_home"] = ctx.chorus_home
+    if "is_admin" in sig.parameters:
+        kwargs["is_admin"] = ctx.is_admin
+    if "db" in sig.parameters:
+        kwargs["db"] = ctx.db
 
     result = await tool.handler(**kwargs)
 

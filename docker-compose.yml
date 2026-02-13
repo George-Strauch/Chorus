@@ -3,8 +3,5 @@ services:
     build: .
     env_file: .env
     volumes:
-      - chorus-data:/home/chorus/.chorus-agents
+      - ./data:/home/chorus/.chorus-agents
     restart: unless-stopped
-
-volumes:
-  chorus-data:

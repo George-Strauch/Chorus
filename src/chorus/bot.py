@@ -381,10 +381,18 @@ class ChorusBot(commands.Bot):
             docs_dir = agent_dir / "docs"
             workspace = agent_dir / "workspace"
 
+            # Determine admin status from message author's guild permissions
+            is_admin = False
+            if hasattr(message.author, "guild_permissions"):
+                is_admin = message.author.guild_permissions.manage_guild
+
             ctx = ToolExecutionContext(
                 workspace=workspace,
                 profile=profile,
                 agent_name=agent.name,
+                chorus_home=self.config.chorus_home,
+                is_admin=is_admin,
+                db=self.db,
             )
 
             llm_messages = await build_llm_context(

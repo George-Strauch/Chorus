@@ -9,6 +9,7 @@ from chorus.agent.directory import AgentDirectory, read_agent_json, write_agent_
 from chorus.models import Agent, AgentNotFoundError, validate_agent_name
 
 if TYPE_CHECKING:
+    from chorus.config import GlobalConfig
     from chorus.storage.db import Database
 
 logger = logging.getLogger("chorus.agent.manager")
@@ -19,9 +20,15 @@ CONFIGURABLE_KEYS = {"system_prompt", "model", "permissions"}
 class AgentManager:
     """Coordinates agent CRUD across filesystem and database."""
 
-    def __init__(self, directory: AgentDirectory, db: Database) -> None:
+    def __init__(
+        self,
+        directory: AgentDirectory,
+        db: Database,
+        global_config: GlobalConfig | None = None,
+    ) -> None:
         self._directory = directory
         self._db = db
+        self._global_config = global_config
 
     async def create(
         self,
@@ -35,6 +42,14 @@ class AgentManager:
         agent_path = self._directory.create(name, overrides)
         agent_data = read_agent_json(agent_path / "agent.json")
         agent_data["channel_id"] = channel_id
+
+        # Apply global defaults for fields not explicitly overridden
+        if self._global_config is not None:
+            override_keys = set(overrides or {})
+            if "model" not in override_keys and not agent_data.get("model"):
+                agent_data["model"] = self._global_config.default_model
+            if "permissions" not in override_keys:
+                agent_data["permissions"] = self._global_config.default_permissions
 
         # Write channel_id back to agent.json
         write_agent_json(agent_path / "agent.json", agent_data)

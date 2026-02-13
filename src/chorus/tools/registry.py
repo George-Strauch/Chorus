@@ -349,4 +349,105 @@ def create_default_registry() -> ToolRegistry:
         )
     )
 
+    # -- Self-edit tools -------------------------------------------------------
+
+    from chorus.agent.self_edit import (
+        edit_docs,
+        edit_model,
+        edit_permissions,
+        edit_system_prompt,
+    )
+
+    registry.register(
+        ToolDefinition(
+            name="self_edit_system_prompt",
+            description="Update this agent's system prompt. Takes effect on the next LLM call.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "new_prompt": {
+                        "type": "string",
+                        "description": "The new system prompt text",
+                    },
+                },
+                "required": ["new_prompt"],
+            },
+            handler=edit_system_prompt,
+        )
+    )
+
+    registry.register(
+        ToolDefinition(
+            name="self_edit_docs",
+            description=(
+                "Create or update a file in this agent's docs/ directory. "
+                "These docs are included in the system prompt context."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": (
+                            "Relative path within docs/ "
+                            "(e.g. 'README.md', 'guides/setup.md')"
+                        ),
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "File content (UTF-8)",
+                    },
+                },
+                "required": ["path", "content"],
+            },
+            handler=edit_docs,
+        )
+    )
+
+    registry.register(
+        ToolDefinition(
+            name="self_edit_permissions",
+            description=(
+                "Update this agent's permission profile. "
+                "Available presets: 'locked', 'standard', 'open'. "
+                "'open' requires admin privileges."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "profile": {
+                        "type": "string",
+                        "description": "Permission preset name ('locked', 'standard', or 'open')",
+                    },
+                },
+                "required": ["profile"],
+            },
+            handler=edit_permissions,
+        )
+    )
+
+    registry.register(
+        ToolDefinition(
+            name="self_edit_model",
+            description=(
+                "Switch this agent's LLM model. "
+                "Validates against available models from /settings validate-keys."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "model": {
+                        "type": "string",
+                        "description": (
+                            "Model identifier "
+                            "(e.g. 'claude-sonnet-4-20250514', 'gpt-4o')"
+                        ),
+                    },
+                },
+                "required": ["model"],
+            },
+            handler=edit_model,
+        )
+    )
+
     return registry

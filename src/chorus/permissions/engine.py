@@ -115,8 +115,16 @@ def format_action(tool_name: str, detail: str = "") -> str:
 PRESETS: dict[str, PermissionProfile] = {
     "open": PermissionProfile(allow=[".*"], ask=[]),
     "standard": PermissionProfile(
-        allow=[r"tool:file:.*", r"tool:git:(?!push|merge_request).*"],
-        ask=[r"tool:bash:.*", r"tool:git:(push|merge_request).*"],
+        allow=[
+            r"tool:file:.*",
+            r"tool:git:(?!push|merge_request).*",
+            r"tool:self_edit:docs .*",
+        ],
+        ask=[
+            r"tool:bash:.*",
+            r"tool:git:(push|merge_request).*",
+            r"tool:self_edit:(system_prompt|permissions|model).*",
+        ],
     ),
     "locked": PermissionProfile(allow=[r"tool:file:view.*"], ask=[]),
 }

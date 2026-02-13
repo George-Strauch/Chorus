@@ -1,6 +1,6 @@
 # TODO 009 — Default Settings
 
-> **Status:** PENDING
+> **Status:** COMPLETED
 
 ## Objective
 

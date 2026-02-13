@@ -11,10 +11,13 @@ COPY template/ template/
 
 RUN pip install --no-cache-dir .
 
-# Create non-root user for running the bot
-RUN useradd --create-home chorus
+# Create non-root user and pre-create data directory with correct ownership
+RUN useradd --create-home chorus \
+    && mkdir -p /home/chorus/.chorus-agents/db \
+    && chown -R chorus:chorus /home/chorus/.chorus-agents
 USER chorus
 
 ENV CHORUS_HOME=/home/chorus/.chorus-agents
+ENV CHORUS_TEMPLATE_DIR=/app/template
 
 CMD ["python", "-m", "chorus"]
