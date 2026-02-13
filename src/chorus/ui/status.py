@@ -51,7 +51,7 @@ def build_status_embed(snapshot: StatusSnapshot) -> discord.Embed:
     """Build a Discord embed from a status snapshot."""
     colour = _STATUS_COLOURS.get(snapshot.status, discord.Colour.greyple())
     embed = discord.Embed(
-        title=f"Agent: {snapshot.agent_name} | Thread #{snapshot.thread_id}",
+        title=f"Agent: {snapshot.agent_name} | Branch #{snapshot.thread_id}",
         colour=colour,
     )
 
@@ -68,7 +68,7 @@ def build_status_embed(snapshot: StatusSnapshot) -> discord.Embed:
     embed.add_field(name="Step", value=step_value, inline=True)
 
     embed.add_field(
-        name="Threads",
+        name="Branches",
         value=str(snapshot.active_thread_count),
         inline=True,
     )

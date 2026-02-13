@@ -1,4 +1,4 @@
-"""Tests for chorus.commands.thread_commands — /thread slash commands."""
+"""Tests for chorus.commands.thread_commands — /branch slash commands."""
 
 from __future__ import annotations
 
@@ -18,8 +18,8 @@ def _make_interaction(bot: MagicMock, channel_id: int = 987654321) -> MagicMock:
     return interaction
 
 
-class TestThreadList:
-    async def test_list_shows_threads(self, mock_bot: MagicMock) -> None:
+class TestBranchList:
+    async def test_list_shows_branches(self, mock_bot: MagicMock) -> None:
         tm = ThreadManager("test-agent")
         t1 = tm.create_thread({"role": "user", "content": "hello"})
         t1.summary = "Auth refactor"
@@ -30,7 +30,7 @@ class TestThreadList:
 
         cog = ThreadCog(mock_bot)
         interaction = _make_interaction(mock_bot)
-        await cog.thread_list.callback(cog, interaction)
+        await cog.branch_list.callback(cog, interaction)
 
         interaction.response.send_message.assert_called_once()
         call_kwargs = interaction.response.send_message.call_args
@@ -43,12 +43,12 @@ class TestThreadList:
 
         cog = ThreadCog(mock_bot)
         interaction = _make_interaction(mock_bot)
-        await cog.thread_list.callback(cog, interaction)
+        await cog.branch_list.callback(cog, interaction)
 
         interaction.response.send_message.assert_called_once()
 
 
-class TestThreadKill:
+class TestBranchKill:
     async def test_kill_by_id(self, mock_bot: MagicMock) -> None:
         tm = ThreadManager("test-agent")
         thread = tm.create_thread({"role": "user", "content": "hello"})
@@ -65,7 +65,7 @@ class TestThreadKill:
 
         cog = ThreadCog(mock_bot)
         interaction = _make_interaction(mock_bot)
-        await cog.thread_kill.callback(cog, interaction, target="1")
+        await cog.branch_kill.callback(cog, interaction, target="1")
 
         assert thread.status == ThreadStatus.COMPLETED
         interaction.response.send_message.assert_called_once()
@@ -88,7 +88,7 @@ class TestThreadKill:
 
         cog = ThreadCog(mock_bot)
         interaction = _make_interaction(mock_bot)
-        await cog.thread_kill.callback(cog, interaction, target="all")
+        await cog.branch_kill.callback(cog, interaction, target="all")
 
         assert t1.status == ThreadStatus.COMPLETED
         assert t2.status == ThreadStatus.COMPLETED
@@ -100,11 +100,11 @@ class TestThreadKill:
 
         cog = ThreadCog(mock_bot)
         interaction = _make_interaction(mock_bot)
-        await cog.thread_kill.callback(cog, interaction, target="999")
+        await cog.branch_kill.callback(cog, interaction, target="999")
 
         interaction.response.send_message.assert_called_once()
         msg = interaction.response.send_message.call_args[0][0]
-        assert "not found" in msg.lower() or "no thread" in msg.lower()
+        assert "not found" in msg.lower() or "no branch" in msg.lower()
 
 
 class TestBreakContext:
@@ -135,7 +135,7 @@ class TestBreakContext:
         call_kwargs = interaction.response.send_message.call_args
         assert call_kwargs.kwargs.get("ephemeral") is True
 
-    async def test_break_context_no_main_thread(self, mock_bot: MagicMock) -> None:
+    async def test_break_context_no_main_branch(self, mock_bot: MagicMock) -> None:
         tm = ThreadManager("test-agent")
         mock_bot._thread_managers = {"test-agent": tm}
         mock_bot._channel_to_agent = {987654321: "test-agent"}
@@ -146,9 +146,9 @@ class TestBreakContext:
 
         interaction.response.send_message.assert_called_once()
         msg = interaction.response.send_message.call_args[0][0]
-        assert "no main thread" in msg.lower() or "no active" in msg.lower()
+        assert "no main branch" in msg.lower() or "no active" in msg.lower()
 
-    async def test_break_context_response_mentions_old_thread(
+    async def test_break_context_response_mentions_old_branch(
         self, mock_bot: MagicMock
     ) -> None:
         tm = ThreadManager("test-agent")
@@ -164,7 +164,7 @@ class TestBreakContext:
         msg = interaction.response.send_message.call_args[0][0]
         assert str(thread.id) in msg
 
-    async def test_break_context_running_thread_continues(
+    async def test_break_context_running_branch_continues(
         self, mock_bot: MagicMock
     ) -> None:
         import asyncio
@@ -184,13 +184,13 @@ class TestBreakContext:
         interaction = _make_interaction(mock_bot)
         await cog.break_context.callback(cog, interaction)
 
-        # Main thread detached but still running
+        # Main branch detached but still running
         assert tm.get_main_thread() is None
         assert thread.status == ThreadStatus.RUNNING
         await tm.kill_all()
 
 
-class TestThreadHistory:
+class TestBranchHistory:
     async def test_history_shows_steps(self, mock_bot: MagicMock) -> None:
         tm = ThreadManager("test-agent")
         thread = tm.create_thread({"role": "user", "content": "hello"})
@@ -203,7 +203,7 @@ class TestThreadHistory:
 
         cog = ThreadCog(mock_bot)
         interaction = _make_interaction(mock_bot)
-        await cog.thread_history.callback(cog, interaction, thread_id=1)
+        await cog.branch_history.callback(cog, interaction, branch_id=1)
 
         interaction.response.send_message.assert_called_once()
         call_kwargs = interaction.response.send_message.call_args

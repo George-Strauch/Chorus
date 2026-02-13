@@ -1,4 +1,4 @@
-"""Thread slash commands — /thread list, /thread kill, /thread history."""
+"""Branch slash commands — /branch list, /branch kill, /branch history."""
 
 from __future__ import annotations
 
@@ -16,12 +16,12 @@ logger = logging.getLogger("chorus.commands.thread")
 
 
 class ThreadCog(commands.Cog):
-    """Cog for execution thread management commands."""
+    """Cog for execution branch management commands."""
 
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
 
-    thread_group = app_commands.Group(name="thread", description="Execution thread management")
+    branch_group = app_commands.Group(name="branch", description="Execution branch management")
 
     def _get_thread_manager(self, channel_id: int) -> ThreadManager | None:
         """Look up the ThreadManager for a channel."""
@@ -31,8 +31,8 @@ class ThreadCog(commands.Cog):
         managers: dict[str, ThreadManager] = getattr(self.bot, "_thread_managers", {})
         return managers.get(agent_name)
 
-    @thread_group.command(name="list", description="List active threads")
-    async def thread_list(self, interaction: discord.Interaction) -> None:
+    @branch_group.command(name="list", description="List active branches")
+    async def branch_list(self, interaction: discord.Interaction) -> None:
         tm = self._get_thread_manager(interaction.channel.id)  # type: ignore[union-attr]
         if tm is None:
             await interaction.response.send_message(
@@ -42,11 +42,11 @@ class ThreadCog(commands.Cog):
 
         threads = tm.list_all()
         if not threads:
-            embed = discord.Embed(title="Threads", description="No threads.")
+            embed = discord.Embed(title="Branches", description="No branches.")
             await interaction.response.send_message(embed=embed)
             return
 
-        embed = discord.Embed(title="Threads", description=f"{len(threads)} thread(s)")
+        embed = discord.Embed(title="Branches", description=f"{len(threads)} branch(es)")
         for t in threads:
             elapsed_s = t.metrics.elapsed_ms / 1000
             summary = t.summary or "Starting..."
@@ -59,9 +59,9 @@ class ThreadCog(commands.Cog):
 
         await interaction.response.send_message(embed=embed)
 
-    @thread_group.command(name="kill", description="Kill a thread or all threads")
-    @app_commands.describe(target="Thread ID or 'all'")
-    async def thread_kill(self, interaction: discord.Interaction, target: str) -> None:
+    @branch_group.command(name="kill", description="Kill a branch or all branches")
+    @app_commands.describe(target="Branch ID or 'all'")
+    async def branch_kill(self, interaction: discord.Interaction, target: str) -> None:
         tm = self._get_thread_manager(interaction.channel.id)  # type: ignore[union-attr]
         if tm is None:
             await interaction.response.send_message(
@@ -71,28 +71,28 @@ class ThreadCog(commands.Cog):
 
         if target.lower() == "all":
             count = await tm.kill_all()
-            await interaction.response.send_message(f"Killed {count} thread(s).")
+            await interaction.response.send_message(f"Killed {count} branch(es).")
             return
 
         try:
-            thread_id = int(target)
+            branch_id = int(target)
         except ValueError:
             await interaction.response.send_message(
-                f"Invalid target: {target!r}. Use a thread ID or 'all'.", ephemeral=True
+                f"Invalid target: {target!r}. Use a branch ID or 'all'.", ephemeral=True
             )
             return
 
-        killed = await tm.kill_thread(thread_id)
+        killed = await tm.kill_thread(branch_id)
         if killed:
-            await interaction.response.send_message(f"Killed thread #{thread_id}.")
+            await interaction.response.send_message(f"Killed branch #{branch_id}.")
         else:
             await interaction.response.send_message(
-                f"No thread #{thread_id} found.", ephemeral=True
+                f"No branch #{branch_id} found.", ephemeral=True
             )
 
     @app_commands.command(
         name="break-context",
-        description="Detach the main thread and start fresh",
+        description="Detach the main branch and start fresh",
     )
     async def break_context(self, interaction: discord.Interaction) -> None:
         tm = self._get_thread_manager(interaction.channel.id)  # type: ignore[union-attr]
@@ -104,18 +104,18 @@ class ThreadCog(commands.Cog):
 
         main = tm.get_main_thread()
         if main is None:
-            await interaction.response.send_message("No active main thread to break.")
+            await interaction.response.send_message("No active main branch to break.")
             return
 
         old_id = main.id
         tm.break_main_thread()
         await interaction.response.send_message(
-            f"Detached main thread #{old_id}. Next message starts a fresh conversation."
+            f"Detached main branch #{old_id}. Next message starts a fresh conversation."
         )
 
-    @thread_group.command(name="history", description="Show step history for a thread")
-    @app_commands.describe(thread_id="Thread ID")
-    async def thread_history(self, interaction: discord.Interaction, thread_id: int) -> None:
+    @branch_group.command(name="history", description="Show step history for a branch")
+    @app_commands.describe(branch_id="Branch ID")
+    async def branch_history(self, interaction: discord.Interaction, branch_id: int) -> None:
         tm = self._get_thread_manager(interaction.channel.id)  # type: ignore[union-attr]
         if tm is None:
             await interaction.response.send_message(
@@ -123,10 +123,10 @@ class ThreadCog(commands.Cog):
             )
             return
 
-        thread = tm.get_thread(thread_id)
+        thread = tm.get_thread(branch_id)
         if thread is None:
             await interaction.response.send_message(
-                f"No thread #{thread_id} found.", ephemeral=True
+                f"No branch #{branch_id} found.", ephemeral=True
             )
             return
 
@@ -134,7 +134,7 @@ class ThreadCog(commands.Cog):
         total_s = thread.metrics.elapsed_ms / 1000
         status = thread.status.value
         embed = discord.Embed(
-            title=f"Thread #{thread_id} — {summary}",
+            title=f"Branch #{branch_id} — {summary}",
             description=f"Status: {status}, {total_s:.1f}s total",
         )
 

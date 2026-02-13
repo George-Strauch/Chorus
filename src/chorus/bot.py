@@ -468,7 +468,7 @@ class ChorusBot(commands.Bot):
                 # Send response to Discord
                 if result.content:
                     # Truncate to Discord's 2000 char limit, with thread ID suffix
-                    thread_tag = f"\n-# thread {thread.id}"
+                    thread_tag = f"\n-# branch {thread.id}"
                     max_content = 2000 - len(thread_tag)
                     content = result.content[:max_content] + thread_tag
                     bot_msg = await message.channel.send(content, reference=message)

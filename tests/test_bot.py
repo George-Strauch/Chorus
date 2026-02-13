@@ -482,4 +482,4 @@ class TestLiveStatusWiring:
         assert len(text_calls) >= 1
         first = text_calls[0]
         content = first.args[0] if first.args else first.kwargs.get("content", "")
-        assert f"thread {thread.id}" in content
+        assert f"branch {thread.id}" in content
