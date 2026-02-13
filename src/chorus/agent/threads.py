@@ -92,6 +92,7 @@ class ExecutionThread:
     )
     summary: str | None = None
     completed_at: datetime | None = None
+    inject_queue: asyncio.Queue[dict[str, Any]] = field(default_factory=asyncio.Queue)
 
 
 # Type alias for the runner callback
@@ -121,8 +122,11 @@ class ThreadManager:
         self._file_locks: dict[str, asyncio.Lock] = {}
         self._thread_file_locks: dict[int, set[str]] = {}  # thread_id -> set of locked paths
         self._next_id: int = 1
+        self._main_thread_id: int | None = None
 
-    def create_thread(self, initial_message: dict[str, Any]) -> ExecutionThread:
+    def create_thread(
+        self, initial_message: dict[str, Any], *, is_main: bool = False
+    ) -> ExecutionThread:
         """Create a new execution thread with an initial message."""
         thread = ExecutionThread(
             id=self._next_id,
@@ -133,6 +137,8 @@ class ThreadManager:
         )
         self._threads[thread.id] = thread
         self._next_id += 1
+        if is_main:
+            self._main_thread_id = thread.id
         logger.info("Created thread #%d for agent %s", thread.id, self._agent_name)
         return thread
 
@@ -177,6 +183,29 @@ class ThreadManager:
     def get_thread(self, thread_id: int) -> ExecutionThread | None:
         """Get a thread by ID."""
         return self._threads.get(thread_id)
+
+    # ── Main Thread ──────────────────────────────────────────────────────
+
+    def get_main_thread(self) -> ExecutionThread | None:
+        """Return the current main thread, or None if unset/cleaned-up."""
+        if self._main_thread_id is None:
+            return None
+        thread = self._threads.get(self._main_thread_id)
+        if thread is None:
+            # Was cleaned up — reset
+            self._main_thread_id = None
+            return None
+        return thread
+
+    def set_main_thread(self, thread_id: int) -> None:
+        """Designate an existing thread as the main thread."""
+        if thread_id not in self._threads:
+            raise ValueError(f"Unknown thread #{thread_id}")
+        self._main_thread_id = thread_id
+
+    def break_main_thread(self) -> None:
+        """Detach the main thread (does NOT kill it)."""
+        self._main_thread_id = None
 
     async def kill_thread(self, thread_id: int) -> bool:
         """Cancel a running thread's task and mark it completed."""

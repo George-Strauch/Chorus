@@ -7,6 +7,7 @@ text response or the iteration cap is reached.
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
 import logging
@@ -153,6 +154,7 @@ async def run_tool_loop(
     model: str,
     max_iterations: int = 25,
     ask_callback: Callable[[str, str], Awaitable[bool]] | None = None,
+    inject_queue: asyncio.Queue[dict[str, Any]] | None = None,
 ) -> ToolLoopResult:
     """Run the agentic tool use loop.
 
@@ -199,6 +201,15 @@ async def run_tool_loop(
     total_tool_calls = 0
 
     for iteration in range(1, max_iterations + 1):
+        # Drain injected messages from the queue before each LLM call
+        if inject_queue is not None:
+            while True:
+                try:
+                    injected = inject_queue.get_nowait()
+                    working_messages.append(injected)
+                except asyncio.QueueEmpty:
+                    break
+
         response = await provider.chat(
             messages=working_messages,
             tools=tool_schemas,

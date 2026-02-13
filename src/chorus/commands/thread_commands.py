@@ -90,6 +90,29 @@ class ThreadCog(commands.Cog):
                 f"No thread #{thread_id} found.", ephemeral=True
             )
 
+    @app_commands.command(
+        name="break-context",
+        description="Detach the main thread and start fresh",
+    )
+    async def break_context(self, interaction: discord.Interaction) -> None:
+        tm = self._get_thread_manager(interaction.channel.id)  # type: ignore[union-attr]
+        if tm is None:
+            await interaction.response.send_message(
+                "No agent bound to this channel.", ephemeral=True
+            )
+            return
+
+        main = tm.get_main_thread()
+        if main is None:
+            await interaction.response.send_message("No active main thread to break.")
+            return
+
+        old_id = main.id
+        tm.break_main_thread()
+        await interaction.response.send_message(
+            f"Detached main thread #{old_id}. Next message starts a fresh conversation."
+        )
+
     @thread_group.command(name="history", description="Show step history for a thread")
     @app_commands.describe(thread_id="Thread ID")
     async def thread_history(self, interaction: discord.Interaction, thread_id: int) -> None:
