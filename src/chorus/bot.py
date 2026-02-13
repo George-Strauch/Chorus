@@ -13,6 +13,7 @@ from discord.ext import commands
 from dotenv import load_dotenv
 
 import chorus.commands
+from chorus.agent.context import ContextManager
 from chorus.agent.directory import AgentDirectory
 from chorus.agent.manager import AgentManager
 from chorus.agent.threads import ThreadManager, ThreadStatus
@@ -31,8 +32,9 @@ class ChorusBot(commands.Bot):
     def __init__(self, config: BotConfig) -> None:
         self.config = config
 
-        # Thread management state (initialized early so on_message works pre-setup_hook)
+        # Thread and context management state (initialized early so on_message works pre-setup_hook)
         self._thread_managers: dict[str, ThreadManager] = {}
+        self._context_managers: dict[str, ContextManager] = {}
         self._channel_to_agent: dict[int, str] = {}
         self._message_queues: dict[int, ChannelMessageQueue] = {}
 
@@ -139,6 +141,15 @@ class ChorusBot(commands.Bot):
             agent_name, ThreadManager(agent_name, db=self.db)
         )
 
+        # Get or create ContextManager for this agent
+        if agent_name not in self._context_managers:
+            agent_dir = self.agent_manager._directory._agents_dir / agent_name
+            sessions_dir = agent_dir / "sessions"
+            self._context_managers[agent_name] = ContextManager(
+                agent_name, self.db, sessions_dir
+            )
+        cm = self._context_managers[agent_name]
+
         # Route: reply → existing thread, non-reply → new thread
         thread = None
         if message.reference and message.reference.message_id:
@@ -148,6 +159,14 @@ class ChorusBot(commands.Bot):
             thread = tm.create_thread({"role": "user", "content": message.content})
         else:
             thread.messages.append({"role": "user", "content": message.content})
+
+        # Persist user message to context
+        await cm.persist_message(
+            role="user",
+            content=message.content,
+            thread_id=thread.id,
+            discord_message_id=message.id,
+        )
 
         # Start if not running (uses _default_runner until TODO 008 wires the real LLM loop)
         if thread.status != ThreadStatus.RUNNING:

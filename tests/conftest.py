@@ -258,3 +258,12 @@ def sample_permission_profiles() -> dict[str, dict[str, list[str]]]:
             "ask": [],
         },
     }
+
+
+@pytest.fixture
+async def context_db(tmp_path: Path) -> AsyncGenerator[Database, None]:
+    """Create a temporary Database for context management tests."""
+    db = Database(tmp_path / "db" / "chorus.db")
+    await db.init()
+    yield db
+    await db.close()

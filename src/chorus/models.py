@@ -29,6 +29,10 @@ class AgentNotFoundError(Exception):
     """Raised when an agent is not found."""
 
 
+class SessionNotFoundError(Exception):
+    """Raised when a saved session is not found."""
+
+
 def validate_agent_name(name: str) -> None:
     """Validate an agent name against the naming rules.
 
@@ -75,3 +79,33 @@ class Agent:
             "permissions": self.permissions,
             "created_at": self.created_at,
         }
+
+
+@dataclass
+class SessionMetadata:
+    """Metadata for a saved context session snapshot."""
+
+    session_id: str
+    agent_name: str
+    description: str
+    summary: str
+    saved_at: str
+    message_count: int
+    file_path: str
+    window_start: str
+    window_end: str
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> SessionMetadata:
+        """Construct a SessionMetadata from a dict (e.g. DB row or JSON)."""
+        return cls(
+            session_id=data["session_id"],
+            agent_name=data["agent_name"],
+            description=data.get("description", ""),
+            summary=data.get("summary", ""),
+            saved_at=data["saved_at"],
+            message_count=data.get("message_count", 0),
+            file_path=data.get("file_path", ""),
+            window_start=data.get("window_start", ""),
+            window_end=data.get("window_end", ""),
+        )
