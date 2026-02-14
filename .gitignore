@@ -36,3 +36,6 @@ Thumbs.db
 .ruff_cache/
 htmlcov/
 .coverage
+
+# Claude Code local settings
+.claude/
