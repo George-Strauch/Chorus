@@ -423,8 +423,18 @@ async def run_tool_loop(
             ),
         )
 
-        # No tool calls → we're done
+        # No tool calls — check for server-side tool results (web search)
         if not response.tool_calls:
+            if response._raw_content is not None:
+                # Server-side tool results (web search) — append and continue
+                # so the LLM can process the search results
+                working_messages.append({
+                    "role": "assistant",
+                    "content": response.content or "",
+                    "_anthropic_content": response._raw_content,
+                })
+                continue
+
             await _fire_event(
                 on_event,
                 ToolLoopEvent(

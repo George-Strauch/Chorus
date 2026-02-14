@@ -56,6 +56,21 @@ class TestFormatResponseFooter:
         footer = format_response_footer(snap)
         assert "5.2s" in footer
 
+    def test_footer_shows_cache_stats(self) -> None:
+        snap = self._make_snapshot(
+            token_usage=Usage(input_tokens=10000, output_tokens=500, cache_read_input_tokens=5000),
+        )
+        footer = format_response_footer(snap)
+        assert "(5,000 cached)" in footer
+        assert "10,000" in footer
+
+    def test_footer_no_cache_stats_when_zero(self) -> None:
+        snap = self._make_snapshot(
+            token_usage=Usage(input_tokens=1000, output_tokens=200),
+        )
+        footer = format_response_footer(snap)
+        assert "cached" not in footer
+
     def test_footer_is_italic(self) -> None:
         snap = self._make_snapshot()
         footer = format_response_footer(snap)
@@ -399,6 +414,20 @@ class TestFormatStatusLine:
         line = format_status_line(snap, 1.0)
         assert "1,234 in" in line
         assert "567 out" in line
+
+    def test_includes_cache_stats_when_nonzero(self) -> None:
+        snap = self._make_snapshot(
+            token_usage=Usage(input_tokens=5000, output_tokens=200, cache_read_input_tokens=3000),
+        )
+        line = format_status_line(snap, 2.0)
+        assert "(3,000 cached)" in line
+
+    def test_no_cache_stats_when_zero(self) -> None:
+        snap = self._make_snapshot(
+            token_usage=Usage(input_tokens=5000, output_tokens=200),
+        )
+        line = format_status_line(snap, 2.0)
+        assert "cached" not in line
 
     def test_includes_tool_call_count(self) -> None:
         snap = self._make_snapshot(tool_calls_made=5)

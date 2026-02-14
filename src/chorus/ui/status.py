@@ -53,6 +53,9 @@ def format_response_footer(snapshot: StatusSnapshot) -> str:
     elapsed_s = snapshot.elapsed_ms / 1000
     tok_in = f"{snapshot.token_usage.input_tokens:,}"
     tok_out = f"{snapshot.token_usage.output_tokens:,}"
+    cached = snapshot.token_usage.cache_read_input_tokens
+    if cached > 0:
+        tok_in += f" ({cached:,} cached)"
 
     parts = [
         f"branch #{snapshot.thread_id}",
@@ -88,6 +91,9 @@ def format_status_line(snapshot: StatusSnapshot, elapsed_s: float) -> str:
     parts.append(f"{elapsed_s:.1f}s")
     tok_in = f"{snapshot.token_usage.input_tokens:,}"
     tok_out = f"{snapshot.token_usage.output_tokens:,}"
+    cached = snapshot.token_usage.cache_read_input_tokens
+    if cached > 0:
+        tok_in += f" ({cached:,} cached)"
     parts.append(f"{tok_in} in / {tok_out} out")
     if snapshot.tool_calls_made > 0:
         n = snapshot.tool_calls_made

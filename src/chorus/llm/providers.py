@@ -34,11 +34,19 @@ class Usage:
 
     input_tokens: int
     output_tokens: int
+    cache_creation_input_tokens: int = 0
+    cache_read_input_tokens: int = 0
 
     def __add__(self, other: Usage) -> Usage:
         return Usage(
             input_tokens=self.input_tokens + other.input_tokens,
             output_tokens=self.output_tokens + other.output_tokens,
+            cache_creation_input_tokens=(
+                self.cache_creation_input_tokens + other.cache_creation_input_tokens
+            ),
+            cache_read_input_tokens=(
+                self.cache_read_input_tokens + other.cache_read_input_tokens
+            ),
         )
 
 
@@ -262,9 +270,13 @@ class AnthropicProvider:
             "max_tokens": 4096,
         }
         if system_prompt:
-            kwargs["system"] = system_prompt
+            kwargs["system"] = [
+                {"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}},
+            ]
         if tools:
-            kwargs["tools"] = tools
+            tools_copy = [dict(t) for t in tools]  # Don't mutate caller's list
+            tools_copy[-1] = {**tools_copy[-1], "cache_control": {"type": "ephemeral"}}
+            kwargs["tools"] = tools_copy
 
         response = await self._client.messages.create(**kwargs)
 
@@ -300,6 +312,10 @@ class AnthropicProvider:
             usage=Usage(
                 input_tokens=response.usage.input_tokens,
                 output_tokens=response.usage.output_tokens,
+                cache_creation_input_tokens=(
+                    getattr(response.usage, "cache_creation_input_tokens", 0) or 0
+                ),
+                cache_read_input_tokens=getattr(response.usage, "cache_read_input_tokens", 0) or 0,
             ),
             model=response.model,
             _raw_content=raw_content,

@@ -162,12 +162,38 @@ class TestUsage:
         assert u.input_tokens == 10
         assert u.output_tokens == 5
 
+    def test_creation_with_cache_fields(self) -> None:
+        u = Usage(
+            input_tokens=10, output_tokens=5,
+            cache_creation_input_tokens=100, cache_read_input_tokens=200,
+        )
+        assert u.cache_creation_input_tokens == 100
+        assert u.cache_read_input_tokens == 200
+
+    def test_cache_fields_default_zero(self) -> None:
+        u = Usage(input_tokens=10, output_tokens=5)
+        assert u.cache_creation_input_tokens == 0
+        assert u.cache_read_input_tokens == 0
+
     def test_add(self) -> None:
         u1 = Usage(input_tokens=10, output_tokens=5)
         u2 = Usage(input_tokens=20, output_tokens=10)
         total = u1 + u2
         assert total.input_tokens == 30
         assert total.output_tokens == 15
+
+    def test_add_with_cache_fields(self) -> None:
+        u1 = Usage(
+            input_tokens=10, output_tokens=5,
+            cache_creation_input_tokens=100, cache_read_input_tokens=200,
+        )
+        u2 = Usage(
+            input_tokens=20, output_tokens=10,
+            cache_creation_input_tokens=50, cache_read_input_tokens=300,
+        )
+        total = u1 + u2
+        assert total.cache_creation_input_tokens == 150
+        assert total.cache_read_input_tokens == 500
 
 
 # ---------------------------------------------------------------------------
@@ -271,12 +297,18 @@ class TestAnthropicProvider:
         )
 
         call_kwargs = mock_client.messages.create.call_args
-        # System prompt should be extracted and passed as kwarg
-        assert call_kwargs.kwargs["system"] == "You are helpful."
+        # System prompt should be extracted and passed as block format with cache_control
+        system = call_kwargs.kwargs["system"]
+        assert isinstance(system, list)
+        assert system[0]["text"] == "You are helpful."
         # Messages should NOT include the system message
         msgs = call_kwargs.kwargs["messages"]
         assert all(m["role"] != "system" for m in msgs)
-        assert call_kwargs.kwargs["tools"] == tools_schema
+        # Tools should include cache_control on last tool
+        sent_tools = call_kwargs.kwargs["tools"]
+        assert sent_tools[-1]["cache_control"] == {"type": "ephemeral"}
+        # Original tool data should be preserved
+        assert sent_tools[0]["name"] == tools_schema[0]["name"]
         assert call_kwargs.kwargs["model"] == "claude-sonnet-4-20250514"
 
     @pytest.mark.asyncio
@@ -295,9 +327,11 @@ class TestAnthropicProvider:
         )
 
         call_kwargs = mock_client.messages.create.call_args.kwargs
-        # Multiple system messages should be joined
-        assert "System msg 1" in call_kwargs["system"]
-        assert "System msg 2" in call_kwargs["system"]
+        # Multiple system messages should be joined into a single block
+        system = call_kwargs["system"]
+        assert isinstance(system, list)
+        assert "System msg 1" in system[0]["text"]
+        assert "System msg 2" in system[0]["text"]
 
     @pytest.mark.asyncio
     async def test_translates_tool_result_messages(self) -> None:
@@ -755,6 +789,109 @@ class TestAnthropicWebSearch:
         result = await provider.chat(messages=[{"role": "user", "content": "Hi"}])
 
         assert result._raw_content is None
+
+
+class TestAnthropicPromptCaching:
+    @pytest.mark.asyncio
+    async def test_cache_control_on_system_prompt(self) -> None:
+        """System prompt is sent as block format with cache_control."""
+        mock_client = MagicMock()
+        mock_client.messages = MagicMock()
+        mock_client.messages.create = AsyncMock(return_value=_make_anthropic_text_response())
+
+        provider = AnthropicProvider("sk-ant-test", "claude-sonnet-4-20250514", _client=mock_client)
+        await provider.chat(
+            messages=[
+                {"role": "system", "content": "You are helpful."},
+                {"role": "user", "content": "Hi"},
+            ],
+        )
+
+        call_kwargs = mock_client.messages.create.call_args.kwargs
+        system = call_kwargs["system"]
+        assert isinstance(system, list)
+        assert len(system) == 1
+        assert system[0]["type"] == "text"
+        assert system[0]["text"] == "You are helpful."
+        assert system[0]["cache_control"] == {"type": "ephemeral"}
+
+    @pytest.mark.asyncio
+    async def test_cache_control_on_tools(self) -> None:
+        """Last tool gets cache_control; others don't. Original list not mutated."""
+        mock_client = MagicMock()
+        mock_client.messages = MagicMock()
+        mock_client.messages.create = AsyncMock(return_value=_make_anthropic_text_response())
+
+        provider = AnthropicProvider("sk-ant-test", "claude-sonnet-4-20250514", _client=mock_client)
+        tool_a = {"name": "tool_a", "description": "A", "input_schema": {}}
+        tool_b = {"name": "tool_b", "description": "B", "input_schema": {}}
+        original_tools = [tool_a, tool_b]
+
+        await provider.chat(
+            messages=[{"role": "user", "content": "Hi"}],
+            tools=original_tools,
+        )
+
+        call_kwargs = mock_client.messages.create.call_args.kwargs
+        sent_tools = call_kwargs["tools"]
+        # Last tool should have cache_control
+        assert sent_tools[-1]["cache_control"] == {"type": "ephemeral"}
+        # First tool should NOT have cache_control
+        assert "cache_control" not in sent_tools[0]
+        # Original tools should NOT be mutated
+        assert "cache_control" not in tool_a
+        assert "cache_control" not in tool_b
+
+    @pytest.mark.asyncio
+    async def test_cache_control_single_tool(self) -> None:
+        """Single tool gets cache_control."""
+        mock_client = MagicMock()
+        mock_client.messages = MagicMock()
+        mock_client.messages.create = AsyncMock(return_value=_make_anthropic_text_response())
+
+        provider = AnthropicProvider("sk-ant-test", "claude-sonnet-4-20250514", _client=mock_client)
+        await provider.chat(
+            messages=[{"role": "user", "content": "Hi"}],
+            tools=[{"name": "only_tool", "description": "X", "input_schema": {}}],
+        )
+
+        call_kwargs = mock_client.messages.create.call_args.kwargs
+        assert call_kwargs["tools"][0]["cache_control"] == {"type": "ephemeral"}
+
+    @pytest.mark.asyncio
+    async def test_cache_usage_parsed(self) -> None:
+        """Cache usage fields are extracted from Anthropic response."""
+        mock_client = MagicMock()
+        mock_client.messages = MagicMock()
+
+        resp = _make_anthropic_text_response()
+        resp.usage.cache_creation_input_tokens = 1500
+        resp.usage.cache_read_input_tokens = 8000
+        mock_client.messages.create = AsyncMock(return_value=resp)
+
+        provider = AnthropicProvider("sk-ant-test", "claude-sonnet-4-20250514", _client=mock_client)
+        result = await provider.chat(messages=[{"role": "user", "content": "Hi"}])
+
+        assert result.usage.cache_creation_input_tokens == 1500
+        assert result.usage.cache_read_input_tokens == 8000
+
+    @pytest.mark.asyncio
+    async def test_cache_usage_defaults_zero(self) -> None:
+        """Missing cache fields default to 0."""
+        mock_client = MagicMock()
+        mock_client.messages = MagicMock()
+
+        resp = _make_anthropic_text_response()
+        # Simulate old API response without cache fields
+        del resp.usage.cache_creation_input_tokens
+        del resp.usage.cache_read_input_tokens
+        mock_client.messages.create = AsyncMock(return_value=resp)
+
+        provider = AnthropicProvider("sk-ant-test", "claude-sonnet-4-20250514", _client=mock_client)
+        result = await provider.chat(messages=[{"role": "user", "content": "Hi"}])
+
+        assert result.usage.cache_creation_input_tokens == 0
+        assert result.usage.cache_read_input_tokens == 0
 
 
 class TestMessagesToAnthropicWebSearch:

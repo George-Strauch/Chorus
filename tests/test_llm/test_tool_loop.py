@@ -566,6 +566,47 @@ class TestToolLoopUsage:
         assert result.total_usage.output_tokens == 20
 
     @pytest.mark.asyncio
+    async def test_usage_addition_with_cache_fields(self, tmp_path: Path) -> None:
+        """Usage.__add__ accumulates cache fields across iterations."""
+        handler = AsyncMock(return_value={"ok": True})
+        registry = _make_registry(("my_tool", handler))
+
+        r1 = LLMResponse(
+            content="Calling tools...",
+            tool_calls=[ToolCall(id="tc_1", name="my_tool", arguments={"arg": "x"})],
+            stop_reason="tool_use",
+            usage=Usage(
+                input_tokens=20, output_tokens=15,
+                cache_creation_input_tokens=100, cache_read_input_tokens=0,
+            ),
+            model="claude-sonnet-4-20250514",
+        )
+        r2 = LLMResponse(
+            content="Done.",
+            tool_calls=[],
+            stop_reason="end_turn",
+            usage=Usage(
+                input_tokens=10, output_tokens=5,
+                cache_creation_input_tokens=0, cache_read_input_tokens=100,
+            ),
+            model="claude-sonnet-4-20250514",
+        )
+        provider = FakeProvider([r1, r2])
+
+        ctx = _make_ctx(tmp_path)
+        result = await run_tool_loop(
+            provider=provider,
+            messages=[{"role": "user", "content": "Do it"}],
+            tools=registry,
+            ctx=ctx,
+            system_prompt="",
+            model="test",
+        )
+
+        assert result.total_usage.cache_creation_input_tokens == 100
+        assert result.total_usage.cache_read_input_tokens == 100
+
+    @pytest.mark.asyncio
     async def test_usage_on_single_turn(self, tmp_path: Path) -> None:
         provider = FakeProvider([_text_response("Hi")])
         ctx = _make_ctx(tmp_path)
@@ -1245,6 +1286,140 @@ class TestWebSearchIntegration:
             web_search_enabled=True,
         )
         assert result.content == "Done."
+
+    @pytest.mark.asyncio
+    async def test_web_search_only_continues_loop(self, tmp_path: Path) -> None:
+        """Server-side web search (no tool_calls) continues the loop instead of exiting."""
+        raw_blocks = [
+            {"type": "text", "text": "Searching..."},
+            {
+                "type": "server_tool_use", "id": "srv_1",
+                "name": "web_search", "input": {"query": "test"},
+            },
+            {
+                "type": "web_search_tool_result",
+                "tool_use_id": "srv_1",
+                "content": [
+                    {"type": "web_search_result", "url": "https://example.com"},
+                ],
+            },
+            {"type": "text", "text": "Found results."},
+        ]
+
+        class AnthropicFake:
+            _call_count = 0
+
+            @property
+            def provider_name(self) -> str:
+                return "anthropic"
+
+            async def chat(
+                self,
+                messages: list[dict[str, Any]],
+                tools: list[dict[str, Any]] | None = None,
+                model: str | None = None,
+            ) -> LLMResponse:
+                self._call_count += 1
+                if self._call_count == 1:
+                    return LLMResponse(
+                        content="Searching...\n\nFound results.",
+                        tool_calls=[],
+                        stop_reason="end_turn",
+                        usage=Usage(input_tokens=20, output_tokens=15),
+                        model="claude-sonnet-4-20250514",
+                        _raw_content=raw_blocks,
+                    )
+                asst_msgs = [
+                    m for m in messages
+                    if m.get("role") == "assistant"
+                ]
+                assert any(
+                    m.get("_anthropic_content") == raw_blocks
+                    for m in asst_msgs
+                ), "Expected _anthropic_content"
+                return _text_response(
+                    "Here are the results from my search."
+                )
+
+        ctx = _make_ctx(tmp_path)
+        result = await run_tool_loop(
+            provider=AnthropicFake(),
+            messages=[{"role": "user", "content": "Search for something"}],
+            tools=_make_registry(),
+            ctx=ctx,
+            system_prompt="",
+            model="test",
+        )
+        assert result.content == "Here are the results from my search."
+        assert result.iterations == 2
+
+    @pytest.mark.asyncio
+    async def test_web_search_only_final_response(self, tmp_path: Path) -> None:
+        """Server-side web search followed by text response returns the text."""
+        raw_blocks = [
+            {"type": "text", "text": "Searching..."},
+            {
+                "type": "server_tool_use", "id": "srv_1",
+                "name": "web_search", "input": {"query": "q"},
+            },
+            {
+                "type": "web_search_tool_result",
+                "tool_use_id": "srv_1", "content": [],
+            },
+        ]
+
+        class AnthropicFake:
+            _call_count = 0
+
+            @property
+            def provider_name(self) -> str:
+                return "anthropic"
+
+            async def chat(
+                self,
+                messages: list[dict[str, Any]],
+                tools: list[dict[str, Any]] | None = None,
+                model: str | None = None,
+            ) -> LLMResponse:
+                self._call_count += 1
+                if self._call_count == 1:
+                    return LLMResponse(
+                        content="Searching...",
+                        tool_calls=[],
+                        stop_reason="end_turn",
+                        usage=Usage(input_tokens=10, output_tokens=5),
+                        model="claude-sonnet-4-20250514",
+                        _raw_content=raw_blocks,
+                    )
+                return _text_response("The answer is 42.")
+
+        ctx = _make_ctx(tmp_path)
+        result = await run_tool_loop(
+            provider=AnthropicFake(),
+            messages=[{"role": "user", "content": "What is the answer?"}],
+            tools=_make_registry(),
+            ctx=ctx,
+            system_prompt="",
+            model="test",
+        )
+        assert result.content == "The answer is 42."
+
+    @pytest.mark.asyncio
+    async def test_web_search_raw_content_none_still_exits(self, tmp_path: Path) -> None:
+        """Normal response (no _raw_content, no tool_calls) exits cleanly."""
+        provider = FakeProvider([_text_response("Normal exit.")])
+        ctx = _make_ctx(tmp_path)
+
+        result = await run_tool_loop(
+            provider=provider,
+            messages=[{"role": "user", "content": "Hi"}],
+            tools=_make_registry(),
+            ctx=ctx,
+            system_prompt="",
+            model="test",
+        )
+        assert result.content == "Normal exit."
+        assert result.iterations == 1
 
     @pytest.mark.asyncio
     async def test_web_search_anthropic_content_preserved_on_assistant_msg(
