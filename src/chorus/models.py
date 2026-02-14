@@ -55,6 +55,7 @@ class Agent:
     model: str | None = None
     system_prompt: str = DEFAULT_SYSTEM_PROMPT
     permissions: str = "standard"
+    web_search: bool = False
     created_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
 
     @classmethod
@@ -66,6 +67,7 @@ class Agent:
             model=data.get("model"),
             system_prompt=data.get("system_prompt", DEFAULT_SYSTEM_PROMPT),
             permissions=data.get("permissions", "standard"),
+            web_search=bool(data.get("web_search", False)),
             created_at=data.get("created_at", datetime.now(UTC).isoformat()),
         )
 
@@ -77,6 +79,7 @@ class Agent:
             "model": self.model,
             "system_prompt": self.system_prompt,
             "permissions": self.permissions,
+            "web_search": self.web_search,
             "created_at": self.created_at,
         }
 

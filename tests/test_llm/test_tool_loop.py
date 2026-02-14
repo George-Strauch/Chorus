@@ -1033,3 +1033,266 @@ class TestToolLoopOnEvent:
         start_events = [e for e in events if e.type == ToolLoopEventType.TOOL_CALL_START]
         assert len(start_events) == 1
         assert start_events[0].tool_name == "my_tool"
+
+
+# ---------------------------------------------------------------------------
+# Web search integration
+# ---------------------------------------------------------------------------
+
+
+class TestWebSearchIntegration:
+    @pytest.mark.asyncio
+    async def test_web_search_tool_injected_for_anthropic(self, tmp_path: Path) -> None:
+        """Web search tool spec is appended to tool_schemas for Anthropic providers."""
+
+        class AnthropicFake:
+            @property
+            def provider_name(self) -> str:
+                return "anthropic"
+
+            async def chat(
+                self,
+                messages: list[dict[str, Any]],
+                tools: list[dict[str, Any]] | None = None,
+                model: str | None = None,
+            ) -> LLMResponse:
+                # Verify web search tool is in the tools list
+                assert tools is not None
+                web_tools = [t for t in tools if t.get("type") == "web_search_20250305"]
+                assert len(web_tools) == 1
+                assert web_tools[0]["name"] == "web_search"
+                assert web_tools[0]["max_uses"] == 5
+                return _text_response("Done.")
+
+        ctx = _make_ctx(tmp_path)
+        ctx.profile = _open_profile()
+
+        result = await run_tool_loop(
+            provider=AnthropicFake(),
+            messages=[{"role": "user", "content": "Search for news"}],
+            tools=_make_registry(),
+            ctx=ctx,
+            system_prompt="",
+            model="claude-sonnet-4-20250514",
+            web_search_enabled=True,
+        )
+        assert result.content == "Done."
+
+    @pytest.mark.asyncio
+    async def test_web_search_not_injected_for_openai(self, tmp_path: Path) -> None:
+        """Web search tool is NOT injected for OpenAI providers."""
+
+        class OpenAIFake:
+            @property
+            def provider_name(self) -> str:
+                return "openai"
+
+            async def chat(
+                self,
+                messages: list[dict[str, Any]],
+                tools: list[dict[str, Any]] | None = None,
+                model: str | None = None,
+            ) -> LLMResponse:
+                # Verify no web search tool
+                if tools:
+                    web_tools = [t for t in tools if t.get("type") == "web_search_20250305"]
+                    assert len(web_tools) == 0
+                return _text_response("Done.")
+
+        ctx = _make_ctx(tmp_path)
+        ctx.profile = _open_profile()
+
+        result = await run_tool_loop(
+            provider=OpenAIFake(),
+            messages=[{"role": "user", "content": "Search for news"}],
+            tools=_make_registry(),
+            ctx=ctx,
+            system_prompt="",
+            model="gpt-4o",
+            web_search_enabled=True,
+        )
+        assert result.content == "Done."
+
+    @pytest.mark.asyncio
+    async def test_web_search_not_injected_when_disabled(self, tmp_path: Path) -> None:
+        """web_search_enabled=False means no web search tool."""
+        provider = FakeProvider([_text_response("Done.")])
+        ctx = _make_ctx(tmp_path)
+        ctx.profile = _open_profile()
+
+        result = await run_tool_loop(
+            provider=provider,
+            messages=[{"role": "user", "content": "Hi"}],
+            tools=_make_registry(),
+            ctx=ctx,
+            system_prompt="",
+            model="test",
+            web_search_enabled=False,
+        )
+        # Check that no web_search_20250305 tool was passed
+        if provider.call_log[0]["tools"]:
+            for t in provider.call_log[0]["tools"]:
+                assert t.get("type") != "web_search_20250305"
+        assert result.content == "Done."
+
+    @pytest.mark.asyncio
+    async def test_web_search_permission_denied_skips(self, tmp_path: Path) -> None:
+        """If permission denies web_search, it's not injected."""
+
+        class AnthropicFake:
+            @property
+            def provider_name(self) -> str:
+                return "anthropic"
+
+            async def chat(
+                self,
+                messages: list[dict[str, Any]],
+                tools: list[dict[str, Any]] | None = None,
+                model: str | None = None,
+            ) -> LLMResponse:
+                # Should NOT have web search tool
+                if tools:
+                    web_tools = [t for t in tools if t.get("type") == "web_search_20250305"]
+                    assert len(web_tools) == 0
+                return _text_response("Done.")
+
+        ctx = _make_ctx(tmp_path)
+        ctx.profile = _deny_profile()
+
+        result = await run_tool_loop(
+            provider=AnthropicFake(),
+            messages=[{"role": "user", "content": "Search"}],
+            tools=_make_registry(),
+            ctx=ctx,
+            system_prompt="",
+            model="test",
+            web_search_enabled=True,
+        )
+        assert result.content == "Done."
+
+    @pytest.mark.asyncio
+    async def test_web_search_permission_ask_approved(self, tmp_path: Path) -> None:
+        """If permission is ASK and user approves, web search is injected."""
+
+        class AnthropicFake:
+            @property
+            def provider_name(self) -> str:
+                return "anthropic"
+
+            async def chat(
+                self,
+                messages: list[dict[str, Any]],
+                tools: list[dict[str, Any]] | None = None,
+                model: str | None = None,
+            ) -> LLMResponse:
+                assert tools is not None
+                web_tools = [t for t in tools if t.get("type") == "web_search_20250305"]
+                assert len(web_tools) == 1
+                return _text_response("Done.")
+
+        ctx = _make_ctx(tmp_path)
+        ctx.profile = _ask_profile()
+
+        ask_callback = AsyncMock(return_value=True)
+
+        result = await run_tool_loop(
+            provider=AnthropicFake(),
+            messages=[{"role": "user", "content": "Search"}],
+            tools=_make_registry(),
+            ctx=ctx,
+            system_prompt="",
+            model="test",
+            ask_callback=ask_callback,
+            web_search_enabled=True,
+        )
+        assert result.content == "Done."
+        ask_callback.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_web_search_permission_ask_denied(self, tmp_path: Path) -> None:
+        """If permission is ASK and user denies, web search is NOT injected."""
+
+        class AnthropicFake:
+            @property
+            def provider_name(self) -> str:
+                return "anthropic"
+
+            async def chat(
+                self,
+                messages: list[dict[str, Any]],
+                tools: list[dict[str, Any]] | None = None,
+                model: str | None = None,
+            ) -> LLMResponse:
+                if tools:
+                    web_tools = [t for t in tools if t.get("type") == "web_search_20250305"]
+                    assert len(web_tools) == 0
+                return _text_response("Done.")
+
+        ctx = _make_ctx(tmp_path)
+        ctx.profile = _ask_profile()
+
+        ask_callback = AsyncMock(return_value=False)
+
+        result = await run_tool_loop(
+            provider=AnthropicFake(),
+            messages=[{"role": "user", "content": "Search"}],
+            tools=_make_registry(),
+            ctx=ctx,
+            system_prompt="",
+            model="test",
+            ask_callback=ask_callback,
+            web_search_enabled=True,
+        )
+        assert result.content == "Done."
+
+    @pytest.mark.asyncio
+    async def test_web_search_anthropic_content_preserved_on_assistant_msg(
+        self, tmp_path: Path
+    ) -> None:
+        """When response has _raw_content, assistant_msg gets _anthropic_content."""
+        raw_blocks = [
+            {"type": "text", "text": "Searching..."},
+            {"type": "server_tool_use", "id": "srv_1", "name": "web_search"},
+        ]
+
+        class AnthropicFake:
+            _call_count = 0
+
+            @property
+            def provider_name(self) -> str:
+                return "anthropic"
+
+            async def chat(
+                self,
+                messages: list[dict[str, Any]],
+                tools: list[dict[str, Any]] | None = None,
+                model: str | None = None,
+            ) -> LLMResponse:
+                self._call_count += 1
+                if self._call_count == 1:
+                    resp = _tool_response(
+                        [ToolCall(id="tc_1", name="create_file", arguments={"arg": "x"})]
+                    )
+                    resp._raw_content = raw_blocks
+                    return resp
+                # On second call, verify _anthropic_content was passed through
+                asst_msgs = [m for m in messages if m.get("role") == "assistant"]
+                assert any(
+                    m.get("_anthropic_content") == raw_blocks for m in asst_msgs
+                ), "Expected _anthropic_content on assistant message"
+                return _text_response("Done.")
+
+        handler = AsyncMock(return_value={"ok": True})
+        registry = _make_registry(("create_file", handler))
+
+        ctx = _make_ctx(tmp_path)
+
+        result = await run_tool_loop(
+            provider=AnthropicFake(),
+            messages=[{"role": "user", "content": "Do it"}],
+            tools=registry,
+            ctx=ctx,
+            system_prompt="",
+            model="test",
+        )
+        assert result.content == "Done."

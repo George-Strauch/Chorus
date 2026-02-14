@@ -14,6 +14,7 @@ from chorus.agent.self_edit import (
     edit_model,
     edit_permissions,
     edit_system_prompt,
+    edit_web_search,
 )
 from chorus.permissions.engine import check, format_action, get_preset
 from chorus.storage.db import Database
@@ -412,6 +413,60 @@ class TestSelfEditModel:
 
 
 # ---------------------------------------------------------------------------
+# Web search
+# ---------------------------------------------------------------------------
+
+
+class TestSelfEditWebSearch:
+    @pytest.mark.asyncio
+    async def test_edit_web_search_enable(self, workspace: Path) -> None:
+        result = await edit_web_search(
+            True,
+            workspace=workspace,
+            agent_name="test-agent",
+        )
+        assert result.success is True
+        assert result.edit_type == "web_search"
+        assert result.new_value == "true"
+        data = json.loads((workspace.parent / "agent.json").read_text())
+        assert data["web_search"] is True
+
+    @pytest.mark.asyncio
+    async def test_edit_web_search_disable(self, workspace: Path) -> None:
+        # First enable it
+        await edit_web_search(True, workspace=workspace, agent_name="test-agent")
+        # Then disable
+        result = await edit_web_search(
+            False,
+            workspace=workspace,
+            agent_name="test-agent",
+        )
+        assert result.success is True
+        assert result.new_value == "false"
+        assert result.old_value == "true"
+        data = json.loads((workspace.parent / "agent.json").read_text())
+        assert data["web_search"] is False
+
+    @pytest.mark.asyncio
+    async def test_edit_web_search_audit_logged(self, workspace: Path, db: Database) -> None:
+        await edit_web_search(
+            True,
+            workspace=workspace,
+            agent_name="test-agent",
+            db=db,
+        )
+        async with db.connection.execute(
+            "SELECT action_string, detail FROM audit_log WHERE agent_name = ?",
+            ("test-agent",),
+        ) as cursor:
+            row = await cursor.fetchone()
+        assert row is not None
+        assert row[0] == "tool:self_edit:web_search"
+        detail = json.loads(row[1])
+        assert detail["new_value"] == "true"
+
+
+# ---------------------------------------------------------------------------
 # Audit logging
 # ---------------------------------------------------------------------------
 
@@ -517,6 +572,7 @@ class TestToolIntegration:
             "self_edit_docs",
             "self_edit_permissions",
             "self_edit_model",
+            "self_edit_web_search",
         ]
         for name in expected:
             assert registry.get(name) is not None, f"Tool {name!r} not registered"
@@ -592,6 +648,9 @@ class TestToolIntegration:
 
         action = _build_action_string("self_edit_model", {"model": "gpt-4o"})
         assert action == "tool:self_edit:model gpt-4o"
+
+        action = _build_action_string("self_edit_web_search", {"enabled": True})
+        assert action == "tool:self_edit:web_search True"
 
 
 # ---------------------------------------------------------------------------

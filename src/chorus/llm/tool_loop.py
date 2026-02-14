@@ -57,7 +57,9 @@ _TOOL_TO_CATEGORY: dict[str, str] = {
     "self_edit_docs": "self_edit",
     "self_edit_permissions": "self_edit",
     "self_edit_model": "self_edit",
+    "self_edit_web_search": "self_edit",
     "list_models": "info",
+    "web_search": "web_search",
 }
 
 
@@ -89,8 +91,12 @@ def _build_action_string(tool_name: str, arguments: dict[str, Any]) -> str:
             detail = f"permissions {arguments.get('profile', '')}"
         elif sub == "model":
             detail = f"model {arguments.get('model', '')}"
+        elif sub == "web_search":
+            detail = f"web_search {arguments.get('enabled', '')}"
         else:
             detail = sub
+    elif category == "web_search":
+        detail = "enabled"
     else:
         detail = str(arguments)
 
@@ -225,6 +231,7 @@ async def run_tool_loop(
     ask_callback: Callable[[str, str], Awaitable[bool]] | None = None,
     inject_queue: asyncio.Queue[dict[str, Any]] | None = None,
     on_event: Callable[[ToolLoopEvent], Awaitable[None]] | None = None,
+    web_search_enabled: bool = False,
 ) -> ToolLoopResult:
     """Run the agentic tool use loop.
 
@@ -259,6 +266,35 @@ async def run_tool_loop(
         tool_schemas = tools_to_openai(tool_defs) if tool_defs else None
     else:
         tool_schemas = tools_to_anthropic(tool_defs) if tool_defs else None
+
+    # Inject Anthropic web search tool if enabled
+    if web_search_enabled and provider.provider_name != "openai":
+        # One-time permission pre-check for web search
+        action = format_action("web_search", "enabled")
+        perm = check(action, ctx.profile)
+        if perm is PermissionResult.DENY:
+            web_search_enabled = False
+            logger.info("Web search denied by permission profile")
+        elif perm is PermissionResult.ASK:
+            if ask_callback is None:
+                web_search_enabled = False
+                logger.info("Web search ASK with no callback, disabling")
+            else:
+                approved = await ask_callback("web_search", '{"enabled": true}')
+                if not approved:
+                    web_search_enabled = False
+                    logger.info("User denied web search")
+
+        if web_search_enabled:
+            web_search_spec = {
+                "type": "web_search_20250305",
+                "name": "web_search",
+                "max_uses": 5,
+            }
+            if tool_schemas is None:
+                tool_schemas = [web_search_spec]
+            else:
+                tool_schemas.append(web_search_spec)
 
     # Prepend system prompt as a system message if not already present
     working_messages = list(messages)
@@ -344,6 +380,8 @@ async def run_tool_loop(
                 for tc in response.tool_calls
             ],
         }
+        if response._raw_content is not None:
+            assistant_msg["_anthropic_content"] = response._raw_content
         working_messages.append(assistant_msg)
 
         # Execute each tool call

@@ -81,6 +81,36 @@ class TestAgentModel:
         validate_agent_name("my-cool-agent")  # Should not raise
 
 
+class TestAgentWebSearch:
+    def test_agent_web_search_default_false(self) -> None:
+        agent = Agent(name="test-agent", channel_id=999)
+        assert agent.web_search is False
+
+    def test_agent_from_dict_with_web_search(self) -> None:
+        data = {
+            "name": "my-agent",
+            "channel_id": 123,
+            "web_search": True,
+        }
+        agent = Agent.from_dict(data)
+        assert agent.web_search is True
+
+    def test_agent_from_dict_without_web_search_defaults_false(self) -> None:
+        data = {"name": "my-agent", "channel_id": 123}
+        agent = Agent.from_dict(data)
+        assert agent.web_search is False
+
+    def test_agent_to_dict_includes_web_search(self) -> None:
+        agent = Agent(name="my-agent", channel_id=123, web_search=True)
+        d = agent.to_dict()
+        assert d["web_search"] is True
+
+    def test_agent_to_dict_roundtrip(self) -> None:
+        agent = Agent(name="my-agent", channel_id=123, web_search=True)
+        roundtripped = Agent.from_dict(agent.to_dict())
+        assert roundtripped.web_search is True
+
+
 class TestSession:
     def test_session_metadata(self) -> None:
         pytest.skip("Not implemented yet — TODO 007")

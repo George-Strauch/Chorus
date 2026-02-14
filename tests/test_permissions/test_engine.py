@@ -119,6 +119,20 @@ class TestPresetStandard:
         assert check("tool:self_edit:model gpt-4o", p) is PermissionResult.ASK
 
 
+class TestPresetStandardWebSearch:
+    def test_standard_preset_asks_web_search(self) -> None:
+        p = get_preset("standard")
+        assert check("tool:web_search:enabled", p) is PermissionResult.ASK
+
+    def test_open_preset_allows_web_search(self) -> None:
+        p = get_preset("open")
+        assert check("tool:web_search:enabled", p) is PermissionResult.ALLOW
+
+    def test_locked_preset_denies_web_search(self) -> None:
+        p = get_preset("locked")
+        assert check("tool:web_search:enabled", p) is PermissionResult.DENY
+
+
 class TestPresetLocked:
     def test_allows_file_view(self) -> None:
         p = get_preset("locked")

@@ -601,6 +601,7 @@ class ChorusBot(commands.Bot):
                     ask_callback=_ask_callback,
                     inject_queue=thread.inject_queue,
                     on_event=on_event,
+                    web_search_enabled=agent.web_search and isinstance(provider, AnthropicProvider),
                 )
 
                 # Finalize status with response content

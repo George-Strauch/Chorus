@@ -13,6 +13,7 @@ from chorus.llm.providers import (
     LLMResponse,
     OpenAIProvider,
     Usage,
+    _messages_to_anthropic,
     tools_to_anthropic,
     tools_to_openai,
 )
@@ -647,3 +648,143 @@ class TestProtocolCompatibility:
             assert isinstance(r.stop_reason, str)
             assert isinstance(r.usage, Usage)
             assert isinstance(r.model, str)
+
+
+# ---------------------------------------------------------------------------
+# Web search support
+# ---------------------------------------------------------------------------
+
+
+def _make_anthropic_web_search_response(
+    model: str = "claude-sonnet-4-20250514",
+) -> MagicMock:
+    """Build a mock Anthropic response with web search blocks."""
+    text_block1 = MagicMock()
+    text_block1.type = "text"
+    text_block1.text = "Let me search for that."
+    text_block1.model_dump = MagicMock(
+        return_value={"type": "text", "text": "Let me search for that."}
+    )
+
+    server_tool_block = MagicMock()
+    server_tool_block.type = "server_tool_use"
+    server_tool_block.id = "srvtoolu_01"
+    server_tool_block.name = "web_search"
+    server_tool_block.model_dump = MagicMock(
+        return_value={
+            "type": "server_tool_use",
+            "id": "srvtoolu_01",
+            "name": "web_search",
+            "input": {"query": "latest news"},
+        }
+    )
+
+    web_result_block = MagicMock()
+    web_result_block.type = "web_search_tool_result"
+    web_result_block.model_dump = MagicMock(
+        return_value={
+            "type": "web_search_tool_result",
+            "tool_use_id": "srvtoolu_01",
+            "content": [{"type": "web_search_result", "url": "https://example.com"}],
+        }
+    )
+
+    text_block2 = MagicMock()
+    text_block2.type = "text"
+    text_block2.text = "Here are the results."
+    text_block2.model_dump = MagicMock(
+        return_value={"type": "text", "text": "Here are the results."}
+    )
+
+    usage = MagicMock()
+    usage.input_tokens = 30
+    usage.output_tokens = 20
+
+    resp = MagicMock()
+    resp.content = [text_block1, server_tool_block, web_result_block, text_block2]
+    resp.stop_reason = "end_turn"
+    resp.usage = usage
+    resp.model = model
+    return resp
+
+
+class TestAnthropicWebSearch:
+    @pytest.mark.asyncio
+    async def test_concatenates_multiple_text_blocks(self) -> None:
+        """Multiple text blocks are joined with double newline."""
+        mock_client = MagicMock()
+        mock_client.messages = MagicMock()
+        mock_client.messages.create = AsyncMock(
+            return_value=_make_anthropic_web_search_response()
+        )
+
+        provider = AnthropicProvider("sk-ant-test", "claude-sonnet-4-20250514", _client=mock_client)
+        result = await provider.chat(messages=[{"role": "user", "content": "Search for news"}])
+
+        assert result.content is not None
+        assert "Let me search for that." in result.content
+        assert "Here are the results." in result.content
+        assert "\n\n" in result.content
+
+    @pytest.mark.asyncio
+    async def test_raw_content_set_for_web_search_blocks(self) -> None:
+        """_raw_content is populated when web search blocks are present."""
+        mock_client = MagicMock()
+        mock_client.messages = MagicMock()
+        mock_client.messages.create = AsyncMock(
+            return_value=_make_anthropic_web_search_response()
+        )
+
+        provider = AnthropicProvider("sk-ant-test", "claude-sonnet-4-20250514", _client=mock_client)
+        result = await provider.chat(messages=[{"role": "user", "content": "Search"}])
+
+        assert result._raw_content is not None
+        assert len(result._raw_content) == 4
+        types = [b["type"] for b in result._raw_content]
+        assert "server_tool_use" in types
+        assert "web_search_tool_result" in types
+
+    @pytest.mark.asyncio
+    async def test_raw_content_none_without_web_search(self) -> None:
+        """_raw_content is None for normal responses without web search."""
+        mock_client = MagicMock()
+        mock_client.messages = MagicMock()
+        mock_client.messages.create = AsyncMock(return_value=_make_anthropic_text_response())
+
+        provider = AnthropicProvider("sk-ant-test", "claude-sonnet-4-20250514", _client=mock_client)
+        result = await provider.chat(messages=[{"role": "user", "content": "Hi"}])
+
+        assert result._raw_content is None
+
+
+class TestMessagesToAnthropicWebSearch:
+    def test_uses_anthropic_content_when_present(self) -> None:
+        """_anthropic_content on an assistant message is used directly."""
+        raw_blocks = [
+            {"type": "text", "text": "Searching..."},
+            {"type": "server_tool_use", "id": "srv_1", "name": "web_search"},
+            {"type": "web_search_tool_result", "tool_use_id": "srv_1", "content": []},
+            {"type": "text", "text": "Found results."},
+        ]
+        messages = [
+            {"role": "user", "content": "Search something"},
+            {
+                "role": "assistant",
+                "content": "Searching...\n\nFound results.",
+                "_anthropic_content": raw_blocks,
+            },
+        ]
+        _, translated = _messages_to_anthropic(messages)
+        # The assistant message should use the raw blocks directly
+        assert translated[1]["role"] == "assistant"
+        assert translated[1]["content"] == raw_blocks
+
+    def test_fallback_without_anthropic_content(self) -> None:
+        """Without _anthropic_content, normal pass-through behavior."""
+        messages = [
+            {"role": "user", "content": "Hi"},
+            {"role": "assistant", "content": "Hello!"},
+        ]
+        _, translated = _messages_to_anthropic(messages)
+        assert translated[1]["role"] == "assistant"
+        assert translated[1]["content"] == "Hello!"
