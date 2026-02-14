@@ -29,15 +29,20 @@ Chorus turns Discord channels into autonomous AI agents. Each channel maps to a 
 - **Isolated workspaces** — each agent gets its own directory, git repo, and session history
 - **Permission profiles** — regex-based allow/ask/deny system controls what agents can do
 - **Multi-provider LLM** — Anthropic and OpenAI, with automatic key validation and model discovery
-- **Agent self-editing** — agents can update their own system prompt, docs, and configuration
-- **Context management** — automatic idle timeout with NL summaries, manual save/restore
-- **Task tracking** — agents maintain a list of running programs visible via `/tasks` and `/status`
+- **Agent self-editing** — agents can update their own system prompt, docs, model, and configuration
+- **Context management** — rolling context window persisted to SQLite, survives restarts, manual save/restore
+- **Live status feedback** — real-time status embeds showing step count, token usage, and elapsed time
+- **Reply-based routing** — reply to any bot message to continue that conversation branch; new messages start new branches
+- **Prompt caching** — Anthropic ephemeral caching with cache token reporting for both Anthropic and OpenAI
+- **Smart prompt refinement** — auto-tailored system prompts generated from a description during agent creation
+- **Web search** — Anthropic server-side web search, toggleable per agent
+- **Message chunking** — long responses automatically split across multiple Discord messages with code-fence awareness
 
 ## Quick Start
 
 ```bash
 # Clone and set up
-git clone <repo-url> chorus
+git clone https://github.com/georgestrauch/Chorus.git chorus
 cd chorus
 python -m venv .venv
 source .venv/bin/activate
@@ -50,6 +55,12 @@ cp .env.example .env
 # Run
 python -m chorus
 ```
+
+## Setup with AI
+
+Paste this prompt into [Claude Code](https://claude.ai/code) or a similar coding agent to get walked through setup:
+
+> Clone the Chorus repo (https://github.com/georgestrauch/Chorus), help me set up a Python virtual environment, install dependencies, and walk me through creating a Discord bot token, getting Anthropic/OpenAI API keys, and configuring the .env file. Then help me run the bot for the first time.
 
 ## Docker
 
@@ -72,11 +83,18 @@ docker compose up -d
 | `/settings show` | Display current defaults and available models |
 | `/settings validate-keys` | Re-test API keys and refresh model list |
 | `/context save [description]` | Save current session |
-| `/context clear` | Clear context (auto-saves first) |
+| `/context clear` | Clear context (advances rolling window marker) |
 | `/context history` | List saved sessions |
 | `/context restore <id>` | Restore a previous session |
-| `/tasks` | View agent's running programs |
-| `/status` | Agent status including running tasks |
+| `/branch list` | List active execution branches with metrics |
+| `/branch kill <id\|all>` | Cancel a running execution branch |
+| `/branch history <id>` | Full step history for a branch (timing, actions) |
+| `/models` | List available LLM models |
+| `/permissions` | List available permission presets |
+| `/ping` | Check bot latency |
+| `/test run [suite]` | Run a live test suite |
+| `/test list` | List available test suites |
+| `/test status` | Bot uptime, latency, guild/agent count |
 
 ## Development
 
@@ -92,6 +110,10 @@ ruff format src/ tests/       # Format
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full system design.
 
+## Security
+
+See [SECURITY.md](SECURITY.md) for the threat model, safety mechanisms, and known limitations.
+
 ## License
 
-TBD
+[MIT](LICENSE)
