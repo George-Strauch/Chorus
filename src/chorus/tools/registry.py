@@ -349,6 +349,26 @@ def create_default_registry() -> ToolRegistry:
         )
     )
 
+    # -- Info tools -------------------------------------------------------------
+
+    from chorus.tools.info import list_models
+
+    registry.register(
+        ToolDefinition(
+            name="list_models",
+            description=(
+                "List all available LLM models discovered from API keys. "
+                "Returns model IDs that can be used with self_edit_model."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+            handler=list_models,
+        )
+    )
+
     # -- Self-edit tools -------------------------------------------------------
 
     from chorus.agent.self_edit import (

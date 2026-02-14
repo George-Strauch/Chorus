@@ -14,7 +14,15 @@ if TYPE_CHECKING:
 
     from chorus.storage.db import Database
 
-from chorus.agent.context import ContextManager, build_llm_context
+from chorus.agent.context import (
+    ContextManager,
+    MODEL_CONTEXT_LIMITS,
+    _CONTEXT_BUDGET_RATIO,
+    _estimate_tokens,
+    _get_context_limit,
+    _truncate_to_budget,
+    build_llm_context,
+)
 from chorus.agent.threads import ThreadManager
 from chorus.models import Agent, SessionNotFoundError
 
@@ -470,3 +478,188 @@ class TestSummaryGeneration:
 
         meta = await ctx_manager.save_snapshot(description="Test", summarizer=failing_summarizer)
         assert meta.summary == "(summary generation failed)"
+
+
+# ── Token Budget ────────────────────────────────────────────────────────
+
+
+class TestGetContextLimit:
+    def test_known_model_returns_correct_limit(self) -> None:
+        assert _get_context_limit("claude-opus-4-20250514") == 200_000
+        assert _get_context_limit("gpt-4o") == 128_000
+        assert _get_context_limit("gpt-4") == 8_192
+
+    def test_unknown_model_returns_default(self) -> None:
+        assert _get_context_limit("some-unknown-model") == 128_000
+
+    def test_none_model_returns_default(self) -> None:
+        assert _get_context_limit(None) == 128_000
+
+    def test_prefix_match_for_dated_variants(self) -> None:
+        # Models like "gpt-4o-2024-08-06" should match "gpt-4o"
+        assert _get_context_limit("gpt-4o-2024-08-06") == 128_000
+
+
+class TestEstimateTokens:
+    def test_basic_estimate(self) -> None:
+        # 100 chars / 4 = 25 tokens
+        text = "a" * 100
+        assert _estimate_tokens(text) == 25
+
+    def test_empty_string(self) -> None:
+        assert _estimate_tokens("") == 0
+
+    def test_short_string(self) -> None:
+        # "hi" = 2 chars / 4 = 0 (integer division)
+        assert _estimate_tokens("hi") == 0
+
+    def test_reasonable_estimate(self) -> None:
+        # A typical paragraph should give a reasonable estimate
+        text = "The quick brown fox jumps over the lazy dog. " * 10
+        tokens = _estimate_tokens(text)
+        assert tokens > 0
+        assert tokens < len(text)  # Should be less than char count
+
+
+class TestTruncateToBudget:
+    def test_empty_messages(self) -> None:
+        assert _truncate_to_budget([], 1000) == []
+
+    def test_preserves_system_messages(self) -> None:
+        msgs = [
+            {"role": "system", "content": "You are helpful."},
+            {"role": "user", "content": "Hello"},
+            {"role": "assistant", "content": "Hi there!"},
+        ]
+        result = _truncate_to_budget(msgs, 10000)
+        assert result[0]["role"] == "system"
+        assert result[0]["content"] == "You are helpful."
+
+    def test_keeps_recent_messages_on_truncation(self) -> None:
+        msgs = [
+            {"role": "system", "content": "System prompt."},
+            {"role": "user", "content": "Old message " * 100},
+            {"role": "assistant", "content": "Old reply " * 100},
+            {"role": "user", "content": "Recent message"},
+            {"role": "assistant", "content": "Recent reply"},
+        ]
+        # Very small budget: system + only recent messages should fit
+        result = _truncate_to_budget(msgs, 50)
+        # System message preserved
+        assert result[0]["role"] == "system"
+        # Most recent conversation messages kept
+        assert result[-1]["content"] == "Recent reply"
+
+    def test_all_fit_within_budget(self) -> None:
+        msgs = [
+            {"role": "system", "content": "Short."},
+            {"role": "user", "content": "Hi"},
+            {"role": "assistant", "content": "Hello"},
+        ]
+        result = _truncate_to_budget(msgs, 100000)
+        assert len(result) == 3
+
+    def test_system_only_when_budget_tiny(self) -> None:
+        msgs = [
+            {"role": "system", "content": "Prompt."},
+            {"role": "user", "content": "A very long message " * 500},
+        ]
+        # Budget so small only system message fits (plus last message as fallback)
+        result = _truncate_to_budget(msgs, 5)
+        assert result[0]["role"] == "system"
+        # Should have system + last conv msg
+        assert len(result) == 2
+
+
+class TestBuildLlmContextModelInfo:
+    async def test_context_includes_model_name(
+        self, ctx_manager: ContextManager
+    ) -> None:
+        agent = Agent(name="test-agent", channel_id=12345, system_prompt="You are helpful.")
+        tm = ThreadManager("test-agent")
+
+        result = await build_llm_context(
+            agent, None, ctx_manager, tm, None, model="gpt-4o"
+        )
+        system_content = result[0]["content"]
+        assert "gpt-4o" in system_content
+
+    async def test_context_includes_available_models(
+        self, ctx_manager: ContextManager
+    ) -> None:
+        agent = Agent(name="test-agent", channel_id=12345, system_prompt="You are helpful.")
+        tm = ThreadManager("test-agent")
+
+        result = await build_llm_context(
+            agent, None, ctx_manager, tm, None,
+            model="gpt-4o",
+            available_models=["gpt-4o", "claude-sonnet-4-20250514"],
+        )
+        system_content = result[0]["content"]
+        assert "gpt-4o" in system_content
+        assert "claude-sonnet-4-20250514" in system_content
+
+    async def test_context_uses_agent_model_as_fallback(
+        self, ctx_manager: ContextManager
+    ) -> None:
+        agent = Agent(
+            name="test-agent", channel_id=12345,
+            system_prompt="You are helpful.",
+            model="claude-opus-4-20250514",
+        )
+        tm = ThreadManager("test-agent")
+
+        result = await build_llm_context(agent, None, ctx_manager, tm, None)
+        system_content = result[0]["content"]
+        assert "claude-opus-4-20250514" in system_content
+
+
+class TestBuildLlmContextPreviousBranchSummary:
+    async def test_includes_previous_branch_summary(
+        self, ctx_manager: ContextManager
+    ) -> None:
+        agent = Agent(name="test-agent", channel_id=12345, system_prompt="You are helpful.")
+        tm = ThreadManager("test-agent")
+
+        result = await build_llm_context(
+            agent, None, ctx_manager, tm, None,
+            previous_branch_summary="We refactored the auth module.",
+            previous_branch_id=3,
+        )
+        # Should have a system message with the branch summary
+        summary_msgs = [
+            m for m in result
+            if m["role"] == "system" and "refactored the auth module" in m.get("content", "")
+        ]
+        assert len(summary_msgs) == 1
+        assert "branch #3" in summary_msgs[0]["content"]
+
+    async def test_no_summary_when_not_provided(
+        self, ctx_manager: ContextManager
+    ) -> None:
+        agent = Agent(name="test-agent", channel_id=12345, system_prompt="You are helpful.")
+        tm = ThreadManager("test-agent")
+
+        result = await build_llm_context(agent, None, ctx_manager, tm, None)
+        summary_msgs = [
+            m for m in result
+            if m["role"] == "system" and "Previous conversation" in m.get("content", "")
+        ]
+        assert len(summary_msgs) == 0
+
+    async def test_no_summary_when_only_summary_no_id(
+        self, ctx_manager: ContextManager
+    ) -> None:
+        agent = Agent(name="test-agent", channel_id=12345, system_prompt="You are helpful.")
+        tm = ThreadManager("test-agent")
+
+        # Summary provided but no branch_id — should not include
+        result = await build_llm_context(
+            agent, None, ctx_manager, tm, None,
+            previous_branch_summary="Some summary",
+        )
+        summary_msgs = [
+            m for m in result
+            if m["role"] == "system" and "Previous conversation" in m.get("content", "")
+        ]
+        assert len(summary_msgs) == 0

@@ -9,6 +9,7 @@ import pytest
 
 from chorus.agent.self_edit import (
     SelfEditResult,
+    _resolve_short_model_name,
     edit_docs,
     edit_model,
     edit_permissions,
@@ -591,3 +592,109 @@ class TestToolIntegration:
 
         action = _build_action_string("self_edit_model", {"model": "gpt-4o"})
         assert action == "tool:self_edit:model gpt-4o"
+
+
+# ---------------------------------------------------------------------------
+# Fuzzy model name resolution
+# ---------------------------------------------------------------------------
+
+
+class TestResolveShortModelName:
+    def test_exact_match_returns_same(self, tmp_path: Path) -> None:
+        chorus_home = tmp_path / "chorus-home"
+        chorus_home.mkdir()
+        cache = {
+            "providers": {
+                "anthropic": {"valid": True, "models": ["claude-opus-4-20250514"]},
+                "openai": {"valid": True, "models": ["gpt-4o"]},
+            },
+        }
+        (chorus_home / "available_models.json").write_text(json.dumps(cache))
+
+        result = _resolve_short_model_name("gpt-4o", chorus_home)
+        assert result == "gpt-4o"
+
+    def test_substring_match_resolves(self, tmp_path: Path) -> None:
+        chorus_home = tmp_path / "chorus-home"
+        chorus_home.mkdir()
+        cache = {
+            "providers": {
+                "anthropic": {
+                    "valid": True,
+                    "models": ["claude-opus-4-20250514", "claude-sonnet-4-20250514"],
+                },
+                "openai": {"valid": True, "models": ["gpt-4o"]},
+            },
+        }
+        (chorus_home / "available_models.json").write_text(json.dumps(cache))
+
+        result = _resolve_short_model_name("opus", chorus_home)
+        assert result == "claude-opus-4-20250514"
+
+    def test_substring_match_case_insensitive(self, tmp_path: Path) -> None:
+        chorus_home = tmp_path / "chorus-home"
+        chorus_home.mkdir()
+        cache = {
+            "providers": {
+                "anthropic": {
+                    "valid": True,
+                    "models": ["claude-sonnet-4-20250514"],
+                },
+            },
+        }
+        (chorus_home / "available_models.json").write_text(json.dumps(cache))
+
+        result = _resolve_short_model_name("Sonnet", chorus_home)
+        assert result == "claude-sonnet-4-20250514"
+
+    def test_no_match_returns_original(self, tmp_path: Path) -> None:
+        chorus_home = tmp_path / "chorus-home"
+        chorus_home.mkdir()
+        cache = {
+            "providers": {
+                "anthropic": {"valid": True, "models": ["claude-opus-4-20250514"]},
+            },
+        }
+        (chorus_home / "available_models.json").write_text(json.dumps(cache))
+
+        result = _resolve_short_model_name("nonexistent-model", chorus_home)
+        assert result == "nonexistent-model"
+
+    def test_no_chorus_home_returns_original(self) -> None:
+        result = _resolve_short_model_name("opus", None)
+        assert result == "opus"
+
+    def test_no_cache_file_returns_original(self, tmp_path: Path) -> None:
+        chorus_home = tmp_path / "empty-chorus-home"
+        chorus_home.mkdir()
+        # No available_models.json file
+        result = _resolve_short_model_name("opus", chorus_home)
+        assert result == "opus"
+
+    @pytest.mark.asyncio
+    async def test_edit_model_uses_fuzzy_resolution(
+        self, workspace: Path, tmp_path: Path
+    ) -> None:
+        """Verify edit_model resolves short names before validating."""
+        chorus_home = tmp_path / "chorus-home"
+        chorus_home.mkdir()
+        cache = {
+            "providers": {
+                "anthropic": {
+                    "valid": True,
+                    "models": ["claude-opus-4-20250514"],
+                },
+            },
+        }
+        (chorus_home / "available_models.json").write_text(json.dumps(cache))
+
+        result = await edit_model(
+            "opus",
+            workspace=workspace,
+            agent_name="test-agent",
+            chorus_home=chorus_home,
+        )
+        assert result.success is True
+        assert result.new_value == "claude-opus-4-20250514"
+        data = json.loads((workspace.parent / "agent.json").read_text())
+        assert data["model"] == "claude-opus-4-20250514"

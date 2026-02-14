@@ -305,6 +305,99 @@ class TestSessionStorage:
         assert len(sessions) == 2
 
 
+class TestBranchStorage:
+    async def test_create_branch(self, db: Database) -> None:
+        await db.create_branch(
+            agent_name="test-bot",
+            branch_id=1,
+            created_at="2026-02-13T10:00:00",
+        )
+        branch = await db.get_branch("test-bot", 1)
+        assert branch is not None
+        assert branch["agent_name"] == "test-bot"
+        assert branch["branch_id"] == 1
+        assert branch["created_at"] == "2026-02-13T10:00:00"
+        assert branch["status"] == "active"
+        assert branch["last_message_at"] == "2026-02-13T10:00:00"
+
+    async def test_get_latest_branch_id_none_when_empty(self, db: Database) -> None:
+        latest = await db.get_latest_branch_id("nonexistent-agent")
+        assert latest is None
+
+    async def test_get_latest_branch_id(self, db: Database) -> None:
+        await db.create_branch("test-bot", 1, "2026-02-13T10:00:00")
+        await db.create_branch("test-bot", 2, "2026-02-13T11:00:00")
+        await db.create_branch("test-bot", 3, "2026-02-13T12:00:00")
+        latest = await db.get_latest_branch_id("test-bot")
+        assert latest == 3
+
+    async def test_get_branch(self, db: Database) -> None:
+        await db.create_branch("test-bot", 5, "2026-02-13T10:00:00")
+        branch = await db.get_branch("test-bot", 5)
+        assert branch is not None
+        assert branch["branch_id"] == 5
+        assert branch["summary"] is None
+
+    async def test_get_branch_missing(self, db: Database) -> None:
+        branch = await db.get_branch("test-bot", 999)
+        assert branch is None
+
+    async def test_update_branch_last_message(self, db: Database) -> None:
+        await db.create_branch("test-bot", 1, "2026-02-13T10:00:00")
+        await db.update_branch_last_message("test-bot", 1, "2026-02-13T15:00:00")
+        branch = await db.get_branch("test-bot", 1)
+        assert branch is not None
+        assert branch["last_message_at"] == "2026-02-13T15:00:00"
+
+    async def test_set_branch_summary(self, db: Database) -> None:
+        await db.create_branch("test-bot", 1, "2026-02-13T10:00:00")
+        await db.set_branch_summary("test-bot", 1, "Worked on auth flow")
+        branch = await db.get_branch("test-bot", 1)
+        assert branch is not None
+        assert branch["summary"] == "Worked on auth flow"
+
+    async def test_set_branch_status(self, db: Database) -> None:
+        await db.create_branch("test-bot", 1, "2026-02-13T10:00:00")
+        assert (await db.get_branch("test-bot", 1))["status"] == "active"  # type: ignore[index]
+        await db.set_branch_status("test-bot", 1, "completed")
+        branch = await db.get_branch("test-bot", 1)
+        assert branch is not None
+        assert branch["status"] == "completed"
+
+    async def test_list_branches_ordered_desc(self, db: Database) -> None:
+        await db.create_branch("test-bot", 1, "2026-02-13T10:00:00")
+        await db.create_branch("test-bot", 2, "2026-02-13T11:00:00")
+        await db.create_branch("test-bot", 3, "2026-02-13T12:00:00")
+        branches = await db.list_branches("test-bot")
+        assert len(branches) == 3
+        # Most recent (highest branch_id) first
+        assert branches[0]["branch_id"] == 3
+        assert branches[1]["branch_id"] == 2
+        assert branches[2]["branch_id"] == 1
+
+    async def test_list_branches_with_limit(self, db: Database) -> None:
+        for i in range(1, 6):
+            await db.create_branch("test-bot", i, f"2026-02-13T1{i}:00:00")
+        branches = await db.list_branches("test-bot", limit=2)
+        assert len(branches) == 2
+        assert branches[0]["branch_id"] == 5
+        assert branches[1]["branch_id"] == 4
+
+    async def test_list_branches_isolated_by_agent(self, db: Database) -> None:
+        await db.create_branch("agent-a", 1, "2026-02-13T10:00:00")
+        await db.create_branch("agent-b", 1, "2026-02-13T10:00:00")
+        branches_a = await db.list_branches("agent-a")
+        assert len(branches_a) == 1
+        assert branches_a[0]["agent_name"] == "agent-a"
+
+    async def test_branches_table_exists(self, db: Database) -> None:
+        async with db.connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='branches'"
+        ) as cursor:
+            row = await cursor.fetchone()
+        assert row is not None
+
+
 class TestAuditLog:
     def test_logs_action(self) -> None:
         pytest.skip("Not implemented yet — TODO 003")

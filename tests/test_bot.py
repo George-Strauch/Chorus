@@ -326,6 +326,7 @@ class TestLiveStatusWiring:
         bot.agent_manager._directory._agents_dir = tmp_chorus_home / "agents"
         bot.global_config.max_tool_loop_iterations = 25
         bot.db = MagicMock()
+        bot.db.get_branch = AsyncMock(return_value=None)
 
         # Mock channel + message
         mock_channel = MagicMock(spec=discord.TextChannel)
@@ -380,10 +381,10 @@ class TestLiveStatusWiring:
 
         return bot, mock_channel, thread
 
-    async def test_runner_sends_status_embed(
+    async def test_runner_sends_thinking_message(
         self, bot_config: BotConfig, tmp_chorus_home: Path, tmp_template: Path
     ) -> None:
-        """Runner should send a single status embed (merged with response)."""
+        """Runner should send a plain 'Thinking...' message first."""
         responses = [
             LLMResponse(
                 content="Hello!",
@@ -400,15 +401,15 @@ class TestLiveStatusWiring:
         with patch("chorus.bot.AnthropicProvider", return_value=provider):
             await runner(thread)
 
-        # Channel.send called once: status embed (response merged into it)
-        assert channel.send.call_count == 1
+        # Channel.send called at least once (thinking message)
+        assert channel.send.call_count >= 1
         first_call = channel.send.call_args_list[0]
-        assert "embed" in first_call.kwargs
+        assert first_call.kwargs["content"] == "Thinking..."
 
     async def test_runner_finalizes_status_on_completion(
         self, bot_config: BotConfig, tmp_chorus_home: Path, tmp_template: Path
     ) -> None:
-        """Status embed is edited to 'completed' after successful loop."""
+        """Status message is edited with response content after successful loop."""
         responses = [
             LLMResponse(
                 content="Done!",
@@ -425,14 +426,12 @@ class TestLiveStatusWiring:
         with patch("chorus.bot.AnthropicProvider", return_value=provider):
             await runner(thread)
 
-        # Status message should have been edited (finalize calls edit)
+        # Status message should have been edited (finalize calls edit for <15s)
         status_msg = bot._test_refs["status_msg"]  # type: ignore[attr-defined]
         status_msg.edit.assert_called()
-        # Last edit should have blue (completed) embed with response content
+        # Last edit should contain the response text as plain content
         last_edit = status_msg.edit.call_args
-        embed = last_edit.kwargs["embed"]
-        assert embed.colour == discord.Colour.blue()
-        assert "Done!" in embed.description
+        assert "Done!" in last_edit.kwargs["content"]
 
     async def test_runner_calls_presence_manager(
         self, bot_config: BotConfig, tmp_chorus_home: Path, tmp_template: Path
@@ -477,8 +476,8 @@ class TestLiveStatusWiring:
         with patch("chorus.bot.AnthropicProvider", return_value=provider):
             await runner(thread)
 
-        # Finalized embed should have branch ID in footer
+        # Finalized message content should have branch ID in footer
         status_msg = bot._test_refs["status_msg"]  # type: ignore[attr-defined]
         last_edit = status_msg.edit.call_args
-        embed = last_edit.kwargs["embed"]
-        assert f"branch #{thread.id}" in embed.footer.text
+        content = last_edit.kwargs["content"]
+        assert f"branch #{thread.id}" in content
