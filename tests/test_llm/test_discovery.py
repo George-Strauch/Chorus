@@ -10,6 +10,8 @@ import pytest
 
 from chorus.llm.discovery import (
     KNOWN_ANTHROPIC_MODELS,
+    _dedup_dated_models,
+    _is_chat_model,
     discover_models,
     get_cached_models,
     read_cache,
@@ -142,30 +144,66 @@ class TestModelDiscovery:
 
     @pytest.mark.asyncio
     async def test_discover_models_openai_filters_chat_models(self) -> None:
-        model1 = MagicMock()
-        model1.id = "gpt-4o"
-        model2 = MagicMock()
-        model2.id = "gpt-4o-mini"
-        model3 = MagicMock()
-        model3.id = "dall-e-3"
-        model4 = MagicMock()
-        model4.id = "text-embedding-ada-002"
-        model5 = MagicMock()
-        model5.id = "chatgpt-4o-latest"
+        ids = [
+            "gpt-4o", "gpt-4o-2024-08-06", "gpt-4o-mini",
+            "gpt-4o-realtime-preview", "gpt-4o-tts", "gpt-4o-transcribe",
+            "gpt-4o-audio-preview", "gpt-4o-search-preview",
+            "dall-e-3", "text-embedding-ada-002",
+            "chatgpt-4o-latest", "chatgpt-image-latest",
+            "gpt-5", "gpt-5-codex", "gpt-5-2025-08-07",
+            "o3-mini", "o3-deep-research", "o4-mini",
+            "gpt-3.5-turbo-instruct",
+        ]
+        data = []
+        for mid in ids:
+            m = MagicMock()
+            m.id = mid
+            data.append(m)
 
         mock_client = MagicMock()
         mock_client.models = MagicMock()
         mock_response = MagicMock()
-        mock_response.data = [model1, model2, model3, model4, model5]
+        mock_response.data = data
         mock_client.models.list = AsyncMock(return_value=mock_response)
 
         models = await discover_models("openai", "sk-test", _client=mock_client)
+        # Chat models kept
         assert "gpt-4o" in models
         assert "gpt-4o-mini" in models
         assert "chatgpt-4o-latest" in models
-        # Image/embedding models should be filtered out
+        assert "gpt-5" in models
+        assert "o3-mini" in models
+        assert "o4-mini" in models
+        # Dated variant dropped (gpt-4o alias exists)
+        assert "gpt-4o-2024-08-06" not in models
+        assert "gpt-5-2025-08-07" not in models
+        # Non-chat models filtered out
         assert "dall-e-3" not in models
         assert "text-embedding-ada-002" not in models
+        assert "gpt-4o-realtime-preview" not in models
+        assert "gpt-4o-tts" not in models
+        assert "gpt-4o-transcribe" not in models
+        assert "gpt-4o-audio-preview" not in models
+        assert "gpt-4o-search-preview" not in models
+        assert "chatgpt-image-latest" not in models
+        assert "gpt-5-codex" not in models
+        assert "o3-deep-research" not in models
+        assert "gpt-3.5-turbo-instruct" not in models
+
+    @pytest.mark.asyncio
+    async def test_discover_openai_keeps_dated_without_alias(self) -> None:
+        """Dated models are kept when no undated alias exists (e.g. o1-2024-12-17)."""
+        m1 = MagicMock()
+        m1.id = "o1-2024-12-17"
+
+        mock_client = MagicMock()
+        mock_client.models = MagicMock()
+        mock_response = MagicMock()
+        mock_response.data = [m1]
+        mock_client.models.list = AsyncMock(return_value=mock_response)
+
+        models = await discover_models("openai", "sk-test", _client=mock_client)
+        assert "o1-2024-12-17" in models
 
     @pytest.mark.asyncio
     async def test_discover_models_unknown_provider(self) -> None:
@@ -380,3 +418,63 @@ class TestValidateAndDiscoverIntegration:
         assert result["providers"]["anthropic"]["valid"] is True
         assert result["providers"]["openai"]["valid"] is True
         assert "gpt-4o" in result["providers"]["openai"]["models"]
+
+
+# ---------------------------------------------------------------------------
+# _is_chat_model
+# ---------------------------------------------------------------------------
+
+
+class TestIsChatModel:
+    def test_chat_models_accepted(self) -> None:
+        assert _is_chat_model("gpt-4o") is True
+        assert _is_chat_model("gpt-4o-mini") is True
+        assert _is_chat_model("gpt-5") is True
+        assert _is_chat_model("o3-mini") is True
+        assert _is_chat_model("o4-mini") is True
+        assert _is_chat_model("chatgpt-4o-latest") is True
+
+    def test_non_chat_rejected(self) -> None:
+        assert _is_chat_model("gpt-4o-realtime-preview") is False
+        assert _is_chat_model("gpt-4o-tts") is False
+        assert _is_chat_model("gpt-4o-transcribe") is False
+        assert _is_chat_model("gpt-4o-audio-preview") is False
+        assert _is_chat_model("gpt-4o-search-preview") is False
+        assert _is_chat_model("gpt-5-codex") is False
+        assert _is_chat_model("o3-deep-research") is False
+        assert _is_chat_model("gpt-3.5-turbo-instruct") is False
+        assert _is_chat_model("chatgpt-image-latest") is False
+        assert _is_chat_model("gpt-4o-transcribe-diarize") is False
+
+    def test_non_openai_rejected(self) -> None:
+        assert _is_chat_model("dall-e-3") is False
+        assert _is_chat_model("text-embedding-ada-002") is False
+        assert _is_chat_model("whisper-1") is False
+
+
+# ---------------------------------------------------------------------------
+# _dedup_dated_models
+# ---------------------------------------------------------------------------
+
+
+class TestDedupDatedModels:
+    def test_removes_dated_when_alias_exists(self) -> None:
+        models = ["gpt-4o", "gpt-4o-2024-08-06", "gpt-4o-2024-11-20"]
+        result = _dedup_dated_models(models)
+        assert result == ["gpt-4o"]
+
+    def test_keeps_dated_when_no_alias(self) -> None:
+        models = ["o1-2024-12-17"]
+        result = _dedup_dated_models(models)
+        assert result == ["o1-2024-12-17"]
+
+    def test_mixed(self) -> None:
+        models = ["gpt-4o", "gpt-4o-2024-08-06", "gpt-4o-mini", "o1-2024-12-17"]
+        result = _dedup_dated_models(models)
+        assert "gpt-4o" in result
+        assert "gpt-4o-mini" in result
+        assert "o1-2024-12-17" in result
+        assert "gpt-4o-2024-08-06" not in result
+
+    def test_empty_list(self) -> None:
+        assert _dedup_dated_models([]) == []

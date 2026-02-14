@@ -33,6 +33,52 @@ KNOWN_ANTHROPIC_MODELS: list[str] = [
 # Prefixes for OpenAI chat models (public for reuse in bot.py)
 OPENAI_CHAT_PREFIXES = ("gpt-", "chatgpt-", "o1-", "o3-", "o4-")
 
+# Substrings that indicate a model is NOT a text chat model
+_OPENAI_NON_CHAT_SUFFIXES = (
+    "-realtime",
+    "-tts",
+    "-transcribe",
+    "-audio",
+    "-image",
+    "-search",
+    "-codex",
+    "-deep-research",
+    "-instruct",
+    "-diarize",
+)
+
+
+def _is_chat_model(model_id: str) -> bool:
+    """Return True if the model is usable for text chat completions."""
+    if not model_id.startswith(OPENAI_CHAT_PREFIXES):
+        return False
+    for suffix in _OPENAI_NON_CHAT_SUFFIXES:
+        if suffix in model_id:
+            return False
+    return True
+
+
+def _dedup_dated_models(models: list[str]) -> list[str]:
+    """Remove dated snapshot variants when an undated alias exists.
+
+    For example, if both ``gpt-4o`` and ``gpt-4o-2024-08-06`` are present,
+    only ``gpt-4o`` is kept.  A model like ``o1-2024-12-17`` is kept if
+    there's no plain ``o1``.
+    """
+    import re
+
+    date_pattern = re.compile(r"^(.+)-(\d{4}-\d{2}-\d{2})$")
+    model_set = set(models)
+    result: list[str] = []
+    for m in models:
+        match = date_pattern.match(m)
+        if match:
+            base = match.group(1)
+            if base in model_set:
+                continue  # undated alias exists — skip the dated one
+        result.append(m)
+    return result
+
 
 # ---------------------------------------------------------------------------
 # Key validation
@@ -138,9 +184,8 @@ async def _discover_openai(api_key: str, *, _client: Any = None) -> list[str]:
         _client = openai.AsyncOpenAI(api_key=api_key)
     try:
         response = await _client.models.list()
-        return sorted(
-            m.id for m in response.data if m.id.startswith(OPENAI_CHAT_PREFIXES)
-        )
+        chat_models = sorted(m.id for m in response.data if _is_chat_model(m.id))
+        return _dedup_dated_models(chat_models)
     except Exception:
         logger.exception("Failed to discover OpenAI models")
         return []

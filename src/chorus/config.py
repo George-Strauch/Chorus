@@ -39,7 +39,10 @@ class BotConfig:
             Path(raw_home).expanduser().resolve() if raw_home else Path.home() / ".chorus-agents"
         )
 
-        raw_guild = os.environ.get("DEV_GUILD_ID", "").strip()
+        raw_guild = (
+            os.environ.get("DEV_GUILD_ID", "").strip()
+            or os.environ.get("DISCORD_GUILD_ID", "").strip()
+        )
         dev_guild_id = int(raw_guild) if raw_guild else None
 
         raw_live_test = os.environ.get("LIVE_TEST_ENABLED", "").strip().lower()
