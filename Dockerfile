@@ -2,9 +2,9 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-# Install git, curl, ca-certificates (needed for agent operations + Docker CLI install)
+# Install git, curl, ca-certificates, openssh-client (needed for agent operations + Docker CLI + git push)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        git curl ca-certificates \
+        git curl ca-certificates openssh-client \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Docker CLI (static binary — no daemon, just the client)
