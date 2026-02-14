@@ -202,6 +202,22 @@ class TestEnvironment:
         result = await bash_execute("echo $HOME", workspace_dir, ALLOW_ALL)
         assert result.stdout.strip() == str(workspace_dir)
 
+    @pytest.mark.asyncio
+    async def test_bash_execute_scope_path_available_when_set(
+        self, workspace_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("SCOPE_PATH", "/mnt/host")
+        result = await bash_execute("echo $SCOPE_PATH", workspace_dir, ALLOW_ALL)
+        assert result.stdout.strip() == "/mnt/host"
+
+    @pytest.mark.asyncio
+    async def test_bash_execute_scope_path_absent_when_not_set(
+        self, workspace_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("SCOPE_PATH", raising=False)
+        result = await bash_execute("echo $SCOPE_PATH", workspace_dir, ALLOW_ALL)
+        assert result.stdout.strip() == ""
+
 
 # ---------------------------------------------------------------------------
 # TestBlocklist

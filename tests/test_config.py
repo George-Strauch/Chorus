@@ -99,6 +99,39 @@ class TestConfig:
             config = BotConfig.from_env()
             assert config.live_test_enabled is False, f"Failed for LIVE_TEST_ENABLED={val}"
 
+    def test_scope_path_from_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("DISCORD_TOKEN", "tok")
+        monkeypatch.setenv("CHORUS_SCOPE_PATH", "/mnt/host")
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.delenv("CHORUS_HOME", raising=False)
+        monkeypatch.delenv("DEV_GUILD_ID", raising=False)
+        config = BotConfig.from_env()
+        assert config.scope_path == Path("/mnt/host")
+        assert config.scope_path.is_absolute()
+
+    def test_scope_path_defaults_to_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("DISCORD_TOKEN", "tok")
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.delenv("CHORUS_HOME", raising=False)
+        monkeypatch.delenv("DEV_GUILD_ID", raising=False)
+        monkeypatch.delenv("CHORUS_SCOPE_PATH", raising=False)
+        config = BotConfig.from_env()
+        assert config.scope_path is None
+
+    def test_scope_path_resolves_relative(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("DISCORD_TOKEN", "tok")
+        monkeypatch.setenv("CHORUS_SCOPE_PATH", "~/host-files")
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.delenv("CHORUS_HOME", raising=False)
+        monkeypatch.delenv("DEV_GUILD_ID", raising=False)
+        config = BotConfig.from_env()
+        assert config.scope_path is not None
+        assert config.scope_path.is_absolute()
+        assert "~" not in str(config.scope_path)
+
     def test_at_least_one_llm_key_required(self) -> None:
         pytest.skip("Not implemented yet — TODO 008")
 

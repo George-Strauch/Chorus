@@ -342,6 +342,7 @@ async def build_llm_context(
     available_models: list[str] | None = None,
     previous_branch_summary: str | None = None,
     previous_branch_id: int | None = None,
+    scope_path: Path | None = None,
 ) -> list[dict[str, Any]]:
     """Assemble the full context for an LLM call.
 
@@ -351,9 +352,10 @@ async def build_llm_context(
     1. System prompt
     2. Agent docs (appended to system prompt)
     3. Model self-awareness info
-    4. Previous branch summary (if any)
-    5. Thread/process status
-    6. Rolling window messages (scoped to branch, truncated to 80% budget)
+    4. Scope path info (if configured)
+    5. Previous branch summary (if any)
+    6. Thread/process status
+    7. Rolling window messages (scoped to branch, truncated to 80% budget)
     """
     messages: list[dict[str, Any]] = []
 
@@ -371,22 +373,31 @@ async def build_llm_context(
         model_list = ", ".join(available_models[:20])  # cap to avoid bloat
         system_parts.append(f"Available models: {model_list}.")
 
+    # 4. Scope path awareness
+    if scope_path is not None:
+        system_parts.append(
+            f"\n\n## Host Filesystem Access\n\n"
+            f"The host user's filesystem is mounted at `{scope_path}`. "
+            f"You can read and write files there using absolute paths in file tools and bash commands. "
+            f"The environment variable `$SCOPE_PATH` is also available in bash and expands to `{scope_path}`."
+        )
+
     messages.append({"role": "system", "content": "\n".join(system_parts)})
 
-    # 4. Previous branch summary
+    # 5. Previous branch summary
     if previous_branch_summary and previous_branch_id is not None:
         messages.append({
             "role": "system",
             "content": f"Previous conversation (branch #{previous_branch_id}): {previous_branch_summary}",
         })
 
-    # 5. Thread status
+    # 6. Thread status
     current_thread_id = thread_id or 0
     thread_status = build_thread_status(thread_manager, current_thread_id)
     if thread_status and thread_status != "No active threads.":
         messages.append({"role": "system", "content": thread_status})
 
-    # 6. Rolling window messages — scoped to this branch
+    # 7. Rolling window messages — scoped to this branch
     window_msgs = await context_manager.get_context(thread_id=thread_id)
     for msg in window_msgs:
         messages.append({
@@ -394,7 +405,7 @@ async def build_llm_context(
             "content": msg.get("content", ""),
         })
 
-    # 7. Token budget truncation (80% of model max)
+    # 8. Token budget truncation (80% of model max)
     context_limit = _get_context_limit(model)
     budget = int(context_limit * _CONTEXT_BUDGET_RATIO)
     messages = _truncate_to_budget(messages, budget)

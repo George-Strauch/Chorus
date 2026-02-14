@@ -23,5 +23,6 @@ USER appuser
 
 ENV CHORUS_HOME=/home/appuser/.chorus-agents
 ENV CHORUS_TEMPLATE_DIR=/app/template
+ENV CHORUS_SCOPE_PATH=/mnt/host
 
 CMD ["python", "-m", "chorus"]

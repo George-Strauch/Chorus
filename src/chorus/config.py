@@ -20,6 +20,7 @@ class BotConfig:
     openai_api_key: str | None = None
     chorus_home: Path = field(default_factory=lambda: Path.home() / ".chorus-agents")
     dev_guild_id: int | None = None
+    scope_path: Path | None = None
     live_test_enabled: bool = False
     live_test_channel: str | None = None
 
@@ -45,6 +46,9 @@ class BotConfig:
         )
         dev_guild_id = int(raw_guild) if raw_guild else None
 
+        raw_scope = os.environ.get("CHORUS_SCOPE_PATH", "").strip()
+        scope_path = Path(raw_scope).expanduser().resolve() if raw_scope else None
+
         raw_live_test = os.environ.get("LIVE_TEST_ENABLED", "").strip().lower()
         live_test_enabled = raw_live_test in ("1", "true", "yes")
 
@@ -56,6 +60,7 @@ class BotConfig:
             anthropic_api_key=anthropic_key,
             openai_api_key=openai_key,
             chorus_home=chorus_home,
+            scope_path=scope_path,
             dev_guild_id=dev_guild_id,
             live_test_enabled=live_test_enabled,
             live_test_channel=live_test_channel,

@@ -122,6 +122,10 @@ class ChorusBot(commands.Bot):
             else:
                 await interaction.followup.send(msg, ephemeral=True)
 
+        # Expose scope path to agent subprocesses
+        if self.config.scope_path is not None:
+            os.environ["SCOPE_PATH"] = str(self.config.scope_path)
+
         # Initialize presence manager
         self._presence_manager = BotPresenceManager(self)
 
@@ -537,6 +541,7 @@ class ChorusBot(commands.Bot):
                 available_models=available_models,
                 previous_branch_summary=previous_summary,
                 previous_branch_id=previous_branch_id,
+                scope_path=self.config.scope_path,
             )
 
             registry = create_default_registry()

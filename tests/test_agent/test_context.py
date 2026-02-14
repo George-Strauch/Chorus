@@ -4,14 +4,13 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock
 
 import pytest
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from chorus.storage.db import Database
 
 from chorus.agent.context import (
@@ -612,6 +611,45 @@ class TestBuildLlmContextModelInfo:
         result = await build_llm_context(agent, None, ctx_manager, tm, None)
         system_content = result[0]["content"]
         assert "claude-opus-4-20250514" in system_content
+
+
+class TestBuildLlmContextScopePath:
+    async def test_context_includes_scope_path_when_set(
+        self, ctx_manager: ContextManager
+    ) -> None:
+        agent = Agent(name="test-agent", channel_id=12345, system_prompt="You are helpful.")
+        tm = ThreadManager("test-agent")
+
+        result = await build_llm_context(
+            agent, None, ctx_manager, tm, None,
+            scope_path=Path("/mnt/host"),
+        )
+        system_content = result[0]["content"]
+        assert "/mnt/host" in system_content
+        assert "$SCOPE_PATH" in system_content
+        assert "Host Filesystem Access" in system_content
+
+    async def test_context_excludes_scope_path_when_not_set(
+        self, ctx_manager: ContextManager
+    ) -> None:
+        agent = Agent(name="test-agent", channel_id=12345, system_prompt="You are helpful.")
+        tm = ThreadManager("test-agent")
+
+        result = await build_llm_context(agent, None, ctx_manager, tm, None)
+        system_content = result[0]["content"]
+        assert "Host Filesystem Access" not in system_content
+        assert "SCOPE_PATH" not in system_content
+
+    async def test_scope_path_none_by_default(
+        self, ctx_manager: ContextManager
+    ) -> None:
+        agent = Agent(name="test-agent", channel_id=12345, system_prompt="You are helpful.")
+        tm = ThreadManager("test-agent")
+
+        # No scope_path kwarg — should be same as not set
+        result = await build_llm_context(agent, None, ctx_manager, tm, None)
+        system_content = result[0]["content"]
+        assert "SCOPE_PATH" not in system_content
 
 
 class TestBuildLlmContextPreviousBranchSummary:

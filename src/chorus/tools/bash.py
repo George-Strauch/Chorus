@@ -77,7 +77,7 @@ class BashResult:
 # ---------------------------------------------------------------------------
 
 ALLOWED_ENV_VARS: frozenset[str] = frozenset(
-    {"PATH", "HOME", "USER", "LANG", "LC_ALL", "TERM", "SHELL", "TMPDIR"}
+    {"PATH", "HOME", "USER", "LANG", "LC_ALL", "TERM", "SHELL", "TMPDIR", "SCOPE_PATH"}
 )
 
 
