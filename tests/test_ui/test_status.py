@@ -15,6 +15,7 @@ from chorus.ui.status import (
     LiveStatusView,
     StatusSnapshot,
     format_response_footer,
+    format_status_line,
 )
 
 # ---------------------------------------------------------------------------
@@ -105,6 +106,7 @@ class TestLiveStatusView:
         channel.send.assert_called_once()
         call_kwargs = channel.send.call_args
         assert call_kwargs.kwargs["content"] == "Thinking..."
+        view._stop_ticker()
 
     @pytest.mark.asyncio
     async def test_start_sends_plain_text_not_embed(self) -> None:
@@ -120,10 +122,11 @@ class TestLiveStatusView:
         await view.start()
         call_kwargs = channel.send.call_args.kwargs
         assert "embed" not in call_kwargs
+        view._stop_ticker()
 
     @pytest.mark.asyncio
-    async def test_update_does_not_edit_message(self) -> None:
-        """Updates are silent — no message edits during processing."""
+    async def test_update_stores_metrics_for_ticker(self) -> None:
+        """update() stores metrics but doesn't directly edit the message."""
         channel = _make_mock_channel()
         clock = FakeClock()
         view = LiveStatusView(
@@ -136,9 +139,10 @@ class TestLiveStatusView:
         await view.start()
         clock.advance(2.0)
         await view.update(current_step="Running bash", step_number=1)
-        await asyncio.sleep(0)
-        msg = channel.send.return_value
-        msg.edit.assert_not_called()
+        # update() itself doesn't edit — the ticker does on its own schedule
+        assert view._snapshot.current_step == "Running bash"
+        assert view._snapshot.step_number == 1
+        view._stop_ticker()
 
     @pytest.mark.asyncio
     async def test_finalize_under_15s_edits_in_place(self) -> None:
@@ -255,6 +259,7 @@ class TestLiveStatusView:
         await view.start()
         call_kwargs = channel.send.call_args.kwargs
         assert call_kwargs["reference"] is ref_message
+        view._stop_ticker()
 
     @pytest.mark.asyncio
     async def test_no_reference_omits_param(self) -> None:
@@ -270,6 +275,7 @@ class TestLiveStatusView:
         await view.start()
         call_kwargs = channel.send.call_args.kwargs
         assert "reference" not in call_kwargs
+        view._stop_ticker()
 
     @pytest.mark.asyncio
     async def test_message_property_none_before_start(self) -> None:
@@ -297,6 +303,7 @@ class TestLiveStatusView:
         )
         await view.start()
         assert view.message is channel.send.return_value
+        view._stop_ticker()
 
     @pytest.mark.asyncio
     async def test_elapsed_ms_auto_tracked(self) -> None:
@@ -358,6 +365,126 @@ class TestLiveStatusView:
         clock.advance(20.0)
         await view.finalize("completed", response_content="Response")
         assert view.message is new_msg
+
+
+# ---------------------------------------------------------------------------
+# format_status_line
+# ---------------------------------------------------------------------------
+
+
+class TestFormatStatusLine:
+    def _make_snapshot(self, **overrides: Any) -> StatusSnapshot:
+        defaults: dict[str, Any] = {
+            "agent_name": "test-agent",
+            "thread_id": 1,
+            "status": "processing",
+        }
+        defaults.update(overrides)
+        return StatusSnapshot(**defaults)
+
+    def test_includes_current_step(self) -> None:
+        snap = self._make_snapshot(current_step="Running bash")
+        line = format_status_line(snap, 3.2)
+        assert "Running bash" in line
+
+    def test_includes_elapsed_time(self) -> None:
+        snap = self._make_snapshot()
+        line = format_status_line(snap, 5.7)
+        assert "5.7s" in line
+
+    def test_includes_token_counts(self) -> None:
+        snap = self._make_snapshot(
+            token_usage=Usage(input_tokens=1234, output_tokens=567),
+        )
+        line = format_status_line(snap, 1.0)
+        assert "1,234 in" in line
+        assert "567 out" in line
+
+    def test_includes_tool_call_count(self) -> None:
+        snap = self._make_snapshot(tool_calls_made=5)
+        line = format_status_line(snap, 2.0)
+        assert "5 calls" in line
+
+    def test_singular_call(self) -> None:
+        snap = self._make_snapshot(tool_calls_made=1)
+        line = format_status_line(snap, 1.0)
+        assert "1 call" in line
+        assert "calls" not in line
+
+    def test_no_calls_omits_count(self) -> None:
+        snap = self._make_snapshot(tool_calls_made=0)
+        line = format_status_line(snap, 1.0)
+        assert "call" not in line
+
+    def test_is_italic(self) -> None:
+        snap = self._make_snapshot()
+        line = format_status_line(snap, 0.0)
+        assert line.startswith("*")
+        assert line.endswith("*")
+
+    def test_default_step_is_starting(self) -> None:
+        snap = self._make_snapshot()
+        line = format_status_line(snap, 0.0)
+        assert "Starting" in line
+
+
+# ---------------------------------------------------------------------------
+# Ticker lifecycle
+# ---------------------------------------------------------------------------
+
+
+class TestTickerLifecycle:
+    @pytest.mark.asyncio
+    async def test_start_creates_ticker_task(self) -> None:
+        channel = _make_mock_channel()
+        clock = FakeClock()
+        view = LiveStatusView(
+            channel=channel,
+            agent_name="test-agent",
+            thread_id=1,
+            get_active_count=lambda: 1,
+            _clock=clock,
+        )
+        await view.start()
+        assert view._ticker_task is not None
+        assert not view._ticker_task.done()
+        view._stop_ticker()
+
+    @pytest.mark.asyncio
+    async def test_finalize_cancels_ticker(self) -> None:
+        channel = _make_mock_channel()
+        clock = FakeClock()
+        view = LiveStatusView(
+            channel=channel,
+            agent_name="test-agent",
+            thread_id=1,
+            get_active_count=lambda: 1,
+            _clock=clock,
+        )
+        await view.start()
+        ticker = view._ticker_task
+        assert ticker is not None
+        await view.finalize("completed", response_content="Done")
+        # Let the event loop process the cancellation
+        await asyncio.sleep(0)
+        assert ticker.done()
+
+    @pytest.mark.asyncio
+    async def test_no_ticker_when_send_fails(self) -> None:
+        channel = _make_mock_channel()
+        channel.send = AsyncMock(
+            side_effect=discord.HTTPException(MagicMock(), "fail"),
+        )
+        clock = FakeClock()
+        view = LiveStatusView(
+            channel=channel,
+            agent_name="test-agent",
+            thread_id=1,
+            get_active_count=lambda: 1,
+            _clock=clock,
+        )
+        await view.start()
+        assert view._ticker_task is None
 
 
 # ---------------------------------------------------------------------------

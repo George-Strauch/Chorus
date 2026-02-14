@@ -76,14 +76,35 @@ def _truncate_response(content: str, max_len: int = 1900) -> str:
 
 _THINKING_MSG = "Thinking..."
 _RESPONSE_EDIT_THRESHOLD_S = 15.0
+_TICKER_INTERVAL_S = 1.1
+
+
+def format_status_line(snapshot: StatusSnapshot, elapsed_s: float) -> str:
+    """Build a live status line shown while processing.
+
+    Format: *Thinking (call 2) · 3.2s · 1,234 in / 567 out · 5 calls*
+    """
+    parts = [snapshot.current_step]
+    parts.append(f"{elapsed_s:.1f}s")
+    tok_in = f"{snapshot.token_usage.input_tokens:,}"
+    tok_out = f"{snapshot.token_usage.output_tokens:,}"
+    parts.append(f"{tok_in} in / {tok_out} out")
+    if snapshot.tool_calls_made > 0:
+        n = snapshot.tool_calls_made
+        parts.append(f"{n} call{'s' if n != 1 else ''}")
+    return "*" + " \u00b7 ".join(parts) + "*"
 
 
 class LiveStatusView:
     """Manages a plain-text status message for one thread.
 
-    Phase 1: Sends a "Thinking..." message on ``start()``.
+    Phase 1: Sends a "Thinking..." message on ``start()`` and begins a
+    background ticker that edits the message every 1.1s with live metrics
+    (elapsed time, token usage, tool call count).
+
     Phase 2 (``finalize()``):
-      - If <15s elapsed: edits the "Thinking..." message with the response.
+      - Stops the ticker.
+      - If <15s elapsed: edits the message with the response.
       - If >=15s elapsed: sends a NEW message with the response.
     """
 
@@ -108,6 +129,7 @@ class LiveStatusView:
         self._clock = _clock or self._default_clock
         self._message: discord.Message | None = None
         self._started_at: float | None = None
+        self._ticker_task: asyncio.Task[None] | None = None
 
     @staticmethod
     def _default_clock() -> float:
@@ -119,7 +141,7 @@ class LiveStatusView:
         return self._message
 
     async def start(self) -> None:
-        """Send the initial 'Thinking...' plain text message."""
+        """Send the initial 'Thinking...' message and start the ticker."""
         self._started_at = self._clock()
         try:
             kwargs: dict[str, Any] = {"content": _THINKING_MSG}
@@ -128,13 +150,41 @@ class LiveStatusView:
             self._message = await self._channel.send(**kwargs)
         except Exception:
             logger.warning("Failed to send thinking message", exc_info=True)
+            return
+
+        # Start background ticker
+        self._ticker_task = asyncio.create_task(self._ticker_loop())
+
+    async def _ticker_loop(self) -> None:
+        """Edit the status message every _TICKER_INTERVAL_S seconds."""
+        while True:
+            await asyncio.sleep(_TICKER_INTERVAL_S)
+            if self._message is None:
+                break
+            elapsed_s = self._elapsed_seconds()
+            line = format_status_line(self._snapshot, elapsed_s)
+            try:
+                await self._message.edit(content=line)
+            except Exception:
+                logger.debug("Ticker edit failed", exc_info=True)
+
+    def _elapsed_seconds(self) -> float:
+        if self._started_at is None:
+            return 0.0
+        return self._clock() - self._started_at
 
     async def update(self, **changes: Any) -> None:
-        """Accept status updates silently — no message edits during processing."""
+        """Accept status updates — the ticker will pick them up."""
         for key, value in changes.items():
             if hasattr(self._snapshot, key):
                 setattr(self._snapshot, key, value)
         self._snapshot.active_thread_count = self._get_active_count()
+
+    def _stop_ticker(self) -> None:
+        """Cancel the background ticker task."""
+        if self._ticker_task is not None and not self._ticker_task.done():
+            self._ticker_task.cancel()
+            self._ticker_task = None
 
     async def finalize(
         self,
@@ -142,11 +192,13 @@ class LiveStatusView:
         error: str | None = None,
         response_content: str | None = None,
     ) -> None:
-        """Deliver the final response.
+        """Stop the ticker and deliver the final response.
 
-        - <15s: edit the "Thinking..." message in-place.
-        - >=15s: send a new message, leave "Thinking..." as-is.
+        - <15s: edit the message in-place with the response.
+        - >=15s: send a NEW message with the response.
         """
+        self._stop_ticker()
+
         self._snapshot.status = status
         if error:
             self._snapshot.error_message = error
@@ -163,7 +215,11 @@ class LiveStatusView:
         content = self._build_final_text()
 
         # Decide: edit-in-place or new message
-        elapsed_s = (self._snapshot.elapsed_ms / 1000) if self._snapshot.elapsed_ms else 0
+        elapsed_s = (
+            (self._snapshot.elapsed_ms / 1000)
+            if self._snapshot.elapsed_ms
+            else 0
+        )
         if elapsed_s < _RESPONSE_EDIT_THRESHOLD_S and self._message is not None:
             # Edit in-place
             try:
@@ -177,7 +233,6 @@ class LiveStatusView:
                 if self._reference is not None:
                     kwargs["reference"] = self._reference
                 new_msg = await self._channel.send(**kwargs)
-                # Update the tracked message to the new one for bot message registration
                 self._message = new_msg
             except Exception:
                 logger.warning("Failed to send response message", exc_info=True)
