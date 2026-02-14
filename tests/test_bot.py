@@ -364,7 +364,14 @@ class TestLiveStatusWiring:
         )
 
         fake_provider = _FakeProvider(provider_responses)
-        runner = bot._make_llm_runner(agent, tm, cm, mock_message, thread)
+        runner = bot._make_llm_runner(
+            agent, tm, cm,
+            channel=mock_channel,
+            author_id=mock_message.author.id,
+            is_admin=False,
+            target_thread=thread,
+            reference=mock_message,
+        )
 
         # Stash refs for assertions
         bot._test_refs = {  # type: ignore[attr-defined]

@@ -301,7 +301,18 @@ class ChorusBot(commands.Bot):
                     agent = await self.agent_manager.get_agent_by_channel(message.channel.id)
                     if agent is None:
                         return
-                    runner = self._make_llm_runner(agent, tm, cm, message, thread)
+                    _is_admin = (
+                        hasattr(message.author, "guild_permissions")
+                        and message.author.guild_permissions.manage_guild
+                    )
+                    runner = self._make_llm_runner(
+                        agent, tm, cm,
+                        channel=message.channel,
+                        author_id=message.author.id,
+                        is_admin=bool(_is_admin),
+                        target_thread=thread,
+                        reference=message,
+                    )
                     tm.start_thread(thread, runner=runner)
                 return
 
@@ -318,7 +329,18 @@ class ChorusBot(commands.Bot):
         agent = await self.agent_manager.get_agent_by_channel(message.channel.id)
         if agent is None:
             return
-        runner = self._make_llm_runner(agent, tm, cm, message, thread)
+        _is_admin = (
+            hasattr(message.author, "guild_permissions")
+            and message.author.guild_permissions.manage_guild
+        )
+        runner = self._make_llm_runner(
+            agent, tm, cm,
+            channel=message.channel,
+            author_id=message.author.id,
+            is_admin=bool(_is_admin),
+            target_thread=thread,
+            reference=message,
+        )
         tm.start_thread(thread, runner=runner)
 
     async def _update_branch_last_message(self, agent_name: str, branch_id: int) -> None:
@@ -347,8 +369,13 @@ class ChorusBot(commands.Bot):
         agent: Agent,
         tm: ThreadManager,
         cm: ContextManager,
-        message: discord.Message,
+        channel: discord.abc.Messageable,
+        author_id: int,
+        is_admin: bool,
         target_thread: ExecutionThread,
+        *,
+        reference: discord.Message | None = None,
+        model_override: str | None = None,
     ) -> ThreadRunner:
         """Build a ThreadRunner closure that runs the LLM tool loop."""
 
@@ -357,16 +384,21 @@ class ChorusBot(commands.Bot):
             profile = get_preset(agent.permissions)
 
             # Choose provider based on model name
-            model = agent.model or self.global_config.default_model or "claude-sonnet-4-20250514"
+            model = (
+                model_override
+                or agent.model
+                or self.global_config.default_model
+                or "claude-sonnet-4-20250514"
+            )
             provider: AnthropicProvider | OpenAIProvider
             if model.startswith(OPENAI_CHAT_PREFIXES):
                 if not self.config.openai_api_key:
-                    await message.channel.send("No OpenAI API key configured.")
+                    await channel.send("No OpenAI API key configured.")
                     return
                 provider = OpenAIProvider(self.config.openai_api_key, model)
             else:
                 if not self.config.anthropic_api_key:
-                    await message.channel.send("No Anthropic API key configured.")
+                    await channel.send("No Anthropic API key configured.")
                     return
                 provider = AnthropicProvider(self.config.anthropic_api_key, model)
 
@@ -374,11 +406,6 @@ class ChorusBot(commands.Bot):
             agent_dir = self.agent_manager._directory._agents_dir / agent.name
             docs_dir = agent_dir / "docs"
             workspace = agent_dir / "workspace"
-
-            # Determine admin status from message author's guild permissions
-            is_admin = False
-            if hasattr(message.author, "guild_permissions"):
-                is_admin = message.author.guild_permissions.manage_guild
 
             ctx = ToolExecutionContext(
                 workspace=workspace,
@@ -422,11 +449,11 @@ class ChorusBot(commands.Bot):
 
             # Set up live status view
             status_view = LiveStatusView(
-                channel=message.channel,
+                channel=channel,
                 agent_name=agent.name,
                 thread_id=thread.id,
                 get_active_count=lambda: len(tm.list_active()),
-                reference=message,
+                reference=reference,
             )
             await status_view.start()
             if status_view.message is not None:
@@ -476,8 +503,8 @@ class ChorusBot(commands.Bot):
                     args = {}
                 action = _build_action_string(tool_name, args)
                 return await ask_user_permission(
-                    channel=message.channel,  # type: ignore[arg-type]
-                    requester_id=message.author.id,
+                    channel=channel,  # type: ignore[arg-type]
+                    requester_id=author_id,
                     action_string=action,
                     tool_name=tool_name,
                     arguments=arguments,
@@ -524,6 +551,70 @@ class ChorusBot(commands.Bot):
                     await self._presence_manager.thread_completed(agent.name, thread.id)
 
         return runner
+
+    async def run_model_query(
+        self,
+        channel: discord.abc.Messageable,
+        author_id: int,
+        is_admin: bool,
+        prompt: str,
+        model_id: str,
+    ) -> None:
+        """Run a one-off query with a specific model, using full agent context.
+
+        Called by model shortcut slash commands (e.g. /haiku, /sonnet).
+        Does NOT change the agent's default model.
+        """
+        channel_id = getattr(channel, "id", None)
+        if channel_id is None:
+            raise ValueError("Channel has no id attribute")
+
+        # Look up agent
+        agent = await self.agent_manager.get_agent_by_channel(channel_id)
+        if agent is None:
+            raise ValueError("No agent bound to this channel.")
+
+        agent_name = agent.name
+
+        # Cache channel→agent mapping
+        self._channel_to_agent[channel_id] = agent_name
+
+        # Get or create ThreadManager
+        tm = self._thread_managers.setdefault(
+            agent_name, ThreadManager(agent_name, db=self.db)
+        )
+        await tm.initialize()
+
+        # Get or create ContextManager
+        if agent_name not in self._context_managers:
+            agent_dir = self.agent_manager._directory._agents_dir / agent_name
+            sessions_dir = agent_dir / "sessions"
+            self._context_managers[agent_name] = ContextManager(
+                agent_name, self.db, sessions_dir
+            )
+        cm = self._context_managers[agent_name]
+
+        # Create a new branch with the user message
+        thread = await tm.create_branch({"role": "user", "content": prompt})
+        await cm.persist_message(
+            role="user",
+            content=prompt,
+            thread_id=thread.id,
+            discord_message_id=None,
+        )
+        await self._update_branch_last_message(agent_name, thread.id)
+        await self._generate_branch_summary(agent_name, thread.id, prompt)
+
+        # Build runner with model override
+        runner = self._make_llm_runner(
+            agent, tm, cm,
+            channel=channel,
+            author_id=author_id,
+            is_admin=is_admin,
+            target_thread=thread,
+            model_override=model_id,
+        )
+        tm.start_thread(thread, runner=runner)
 
 
 def main() -> None:
