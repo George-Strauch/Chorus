@@ -35,6 +35,7 @@ class StatusSnapshot:
     llm_iterations: int = 0
     tool_calls_made: int = 0
     tools_used: list[str] = field(default_factory=list)
+    recent_commands: list[str] = field(default_factory=list)
     elapsed_ms: int = 0
     error_message: str | None = None
     response_content: str | None = None
@@ -140,10 +141,15 @@ _RESPONSE_EDIT_THRESHOLD_S = 15.0
 _TICKER_INTERVAL_S = 1.1
 
 
+_CMD_TRUNCATE_LEN = 80
+
+
 def format_status_line(snapshot: StatusSnapshot, elapsed_s: float) -> str:
     """Build a live status line shown while processing.
 
     Format: *Thinking (call 2) · 3.2s · 1,234 in / 567 out · 5 calls*
+
+    When recent commands exist, appends them below the status line.
     """
     parts = [snapshot.current_step]
     parts.append(f"{elapsed_s:.1f}s")
@@ -156,7 +162,17 @@ def format_status_line(snapshot: StatusSnapshot, elapsed_s: float) -> str:
     if snapshot.tool_calls_made > 0:
         n = snapshot.tool_calls_made
         parts.append(f"{n} call{'s' if n != 1 else ''}")
-    return "*" + " \u00b7 ".join(parts) + "*"
+    line = "*" + " \u00b7 ".join(parts) + "*"
+
+    if snapshot.recent_commands:
+        cmd_lines = []
+        for cmd in snapshot.recent_commands:
+            if len(cmd) > _CMD_TRUNCATE_LEN:
+                cmd = cmd[:_CMD_TRUNCATE_LEN] + "\u2026"
+            cmd_lines.append(f"`{cmd}`")
+        line += "\n\n**Recent commands:**\n" + "\n".join(cmd_lines)
+
+    return line
 
 
 class LiveStatusView:

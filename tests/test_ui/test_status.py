@@ -457,6 +457,48 @@ class TestFormatStatusLine:
         line = format_status_line(snap, 0.0)
         assert "Starting" in line
 
+    def test_recent_commands_appended(self) -> None:
+        snap = self._make_snapshot(
+            recent_commands=["git status", "npm install", "pytest tests/ -v"],
+        )
+        line = format_status_line(snap, 3.0)
+        assert "**Recent commands:**" in line
+        assert "`git status`" in line
+        assert "`npm install`" in line
+        assert "`pytest tests/ -v`" in line
+
+    def test_empty_recent_commands_no_section(self) -> None:
+        snap = self._make_snapshot(recent_commands=[])
+        line = format_status_line(snap, 2.0)
+        assert "Recent commands" not in line
+        # Should be the same single-line format as before
+        assert line.startswith("*")
+        assert line.endswith("*")
+
+    def test_long_command_truncated(self) -> None:
+        long_cmd = "x" * 120
+        snap = self._make_snapshot(recent_commands=[long_cmd])
+        line = format_status_line(snap, 1.0)
+        # Should be truncated at 80 chars + ellipsis
+        assert "`" + "x" * 80 + "\u2026`" in line
+        assert "x" * 81 not in line
+
+    def test_max_five_commands_shown(self) -> None:
+        cmds = [f"cmd-{i}" for i in range(5)]
+        snap = self._make_snapshot(recent_commands=cmds)
+        line = format_status_line(snap, 1.0)
+        for cmd in cmds:
+            assert f"`{cmd}`" in line
+
+    def test_commands_most_recent_last(self) -> None:
+        cmds = ["first", "second", "third"]
+        snap = self._make_snapshot(recent_commands=cmds)
+        line = format_status_line(snap, 1.0)
+        pos_first = line.index("`first`")
+        pos_second = line.index("`second`")
+        pos_third = line.index("`third`")
+        assert pos_first < pos_second < pos_third
+
 
 # ---------------------------------------------------------------------------
 # Ticker lifecycle

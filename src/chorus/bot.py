@@ -435,6 +435,8 @@ class ChorusBot(commands.Bot):
                 await self._presence_manager.thread_started(agent.name, thread.id)
 
             # Bridge tool loop events to status view
+            recent_commands: list[str] = []
+
             async def on_event(event: ToolLoopEvent) -> None:
                 updates: dict[str, object] = {}
                 if event.total_usage:
@@ -445,6 +447,20 @@ class ChorusBot(commands.Bot):
                 if event.type == ToolLoopEventType.TOOL_CALL_START and event.tool_name:
                     updates["current_step"] = f"Running {event.tool_name}"
                     updates["step_number"] = event.tool_calls_made + 1
+                    # Track recent bash/git commands for live status
+                    if event.tool_arguments:
+                        cmd: str | None = None
+                        if event.tool_name == "bash":
+                            cmd = event.tool_arguments.get("command")
+                        elif event.tool_name and event.tool_name.startswith("git_"):
+                            op = event.tool_name.removeprefix("git_")
+                            args = " ".join(str(v) for v in event.tool_arguments.values())
+                            cmd = f"git {op} {args}".strip()
+                        if cmd:
+                            recent_commands.append(cmd)
+                            if len(recent_commands) > 5:
+                                recent_commands.pop(0)
+                            updates["recent_commands"] = list(recent_commands)
                 elif event.type == ToolLoopEventType.LLM_CALL_START:
                     updates["current_step"] = f"Thinking (call {event.iteration})"
                 await status_view.update(**updates)

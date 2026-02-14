@@ -220,6 +220,7 @@ class ToolLoopEvent:
     type: ToolLoopEventType
     iteration: int
     tool_name: str | None = None
+    tool_arguments: dict[str, Any] | None = None
     usage_delta: Usage | None = None
     total_usage: Usage | None = None
     tool_calls_made: int = 0
@@ -479,6 +480,7 @@ async def run_tool_loop(
                     type=ToolLoopEventType.TOOL_CALL_START,
                     iteration=iteration,
                     tool_name=tc.name,
+                    tool_arguments=tc.arguments,
                     tool_calls_made=total_tool_calls,
                     tools_used=list(tools_used),
                     total_usage=total_usage,
