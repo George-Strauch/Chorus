@@ -383,7 +383,7 @@ class TestLiveStatusWiring:
     async def test_runner_sends_status_embed(
         self, bot_config: BotConfig, tmp_chorus_home: Path, tmp_template: Path
     ) -> None:
-        """Runner should send an initial status embed on start."""
+        """Runner should send a single status embed (merged with response)."""
         responses = [
             LLMResponse(
                 content="Hello!",
@@ -400,9 +400,8 @@ class TestLiveStatusWiring:
         with patch("chorus.bot.AnthropicProvider", return_value=provider):
             await runner(thread)
 
-        # Channel.send called at least twice: status embed + response
-        assert channel.send.call_count >= 2
-        # First call should have an embed
+        # Channel.send called once: status embed (response merged into it)
+        assert channel.send.call_count == 1
         first_call = channel.send.call_args_list[0]
         assert "embed" in first_call.kwargs
 
@@ -429,10 +428,11 @@ class TestLiveStatusWiring:
         # Status message should have been edited (finalize calls edit)
         status_msg = bot._test_refs["status_msg"]  # type: ignore[attr-defined]
         status_msg.edit.assert_called()
-        # Last edit should have green (completed) embed
+        # Last edit should have blue (completed) embed with response content
         last_edit = status_msg.edit.call_args
         embed = last_edit.kwargs["embed"]
-        assert embed.colour == discord.Colour.green()
+        assert embed.colour == discord.Colour.blue()
+        assert "Done!" in embed.description
 
     async def test_runner_calls_presence_manager(
         self, bot_config: BotConfig, tmp_chorus_home: Path, tmp_template: Path
@@ -457,10 +457,10 @@ class TestLiveStatusWiring:
         bot._presence_manager.thread_started.assert_called_once()
         bot._presence_manager.thread_completed.assert_called_once()
 
-    async def test_runner_includes_thread_id_in_response(
+    async def test_runner_includes_thread_id_in_finalized_embed(
         self, bot_config: BotConfig, tmp_chorus_home: Path, tmp_template: Path
     ) -> None:
-        """Response messages should include thread ID."""
+        """Finalized embed footer should include branch ID."""
         responses = [
             LLMResponse(
                 content="Hello!",
@@ -477,9 +477,8 @@ class TestLiveStatusWiring:
         with patch("chorus.bot.AnthropicProvider", return_value=provider):
             await runner(thread)
 
-        # Find the call that sends the text response (not the embed)
-        text_calls = [c for c in channel.send.call_args_list if "embed" not in c.kwargs]
-        assert len(text_calls) >= 1
-        first = text_calls[0]
-        content = first.args[0] if first.args else first.kwargs.get("content", "")
-        assert f"branch {thread.id}" in content
+        # Finalized embed should have branch ID in footer
+        status_msg = bot._test_refs["status_msg"]  # type: ignore[attr-defined]
+        last_edit = status_msg.edit.call_args
+        embed = last_edit.kwargs["embed"]
+        assert f"branch #{thread.id}" in embed.footer.text
