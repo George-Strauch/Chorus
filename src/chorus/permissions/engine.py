@@ -49,14 +49,22 @@ class PermissionProfile:
 
     Patterns are compiled once at construction time.  Invalid patterns
     raise :exc:`InvalidPermissionPatternError` immediately.
+
+    Matching order: deny → allow → ask → implicit deny.
     """
 
     allow: list[str]
     ask: list[str]
+    deny: list[str] = field(default_factory=list)
     _compiled_allow: list[re.Pattern[str]] = field(init=False, repr=False)
     _compiled_ask: list[re.Pattern[str]] = field(init=False, repr=False)
+    _compiled_deny: list[re.Pattern[str]] = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
+        try:
+            self._compiled_deny = [re.compile(p) for p in self.deny]
+        except re.error as exc:
+            raise InvalidPermissionPatternError(f"Invalid deny pattern: {exc}") from exc
         try:
             self._compiled_allow = [re.compile(p) for p in self.allow]
         except re.error as exc:
@@ -70,12 +78,15 @@ class PermissionProfile:
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to a JSON-compatible dict."""
-        return {"allow": self.allow, "ask": self.ask}
+        d: dict[str, Any] = {"allow": self.allow, "ask": self.ask}
+        if self.deny:
+            d["deny"] = self.deny
+        return d
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> PermissionProfile:
         """Deserialize from a dict (e.g. from ``agent.json``)."""
-        return cls(allow=data["allow"], ask=data["ask"])
+        return cls(allow=data["allow"], ask=data["ask"], deny=data.get("deny", []))
 
 
 # ---------------------------------------------------------------------------
@@ -86,9 +97,12 @@ class PermissionProfile:
 def check(action: str, profile: PermissionProfile) -> PermissionResult:
     """Check *action* against *profile*.
 
-    Matching order: allow → ask → deny.  Uses ``fullmatch`` so the
-    entire action string must match the pattern.
+    Matching order: deny → allow → ask → implicit deny.  Uses ``fullmatch``
+    so the entire action string must match the pattern.
     """
+    for pattern in profile._compiled_deny:
+        if pattern.fullmatch(action):
+            return PermissionResult.DENY
     for pattern in profile._compiled_allow:
         if pattern.fullmatch(action):
             return PermissionResult.ALLOW
@@ -127,6 +141,20 @@ PRESETS: dict[str, PermissionProfile] = {
             r"tool:self_edit:(system_prompt|permissions|model).*",
             r"tool:web_search:.*",
         ],
+    ),
+    "guarded": PermissionProfile(
+        deny=[
+            # gh write operations
+            r"tool:bash:.*\bgh\s+\S+\s+(create|delete|close|merge|edit|comment|review|approve|reopen)\b.*",
+            # gh api with write methods
+            r"tool:bash:.*\bgh\s+api\s+.*(-X|--method)\s+(POST|PUT|PATCH|DELETE)\b.*",
+            # doctl write operations
+            r"tool:bash:.*\bdoctl\s+.*\b(create|delete|update|destroy)\b.*",
+            # git push and merge
+            r"tool:git:(push|merge_request).*",
+        ],
+        allow=[".*"],
+        ask=[],
     ),
     "locked": PermissionProfile(allow=[r"tool:file:view.*"], ask=[]),
 }

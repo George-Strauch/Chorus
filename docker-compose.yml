@@ -1,7 +1,12 @@
 services:
   bot:
-    build: .
+    build:
+      context: .
+      args:
+        UID: ${UID:-1000}
+        GID: ${GID:-1000}
     env_file: .env
     volumes:
-      - ./data:/home/chorus/.chorus-agents
+      - ${HOME}/.chorus-agents:/home/appuser/.chorus-agents
+      - ${SCOPE_PATH:-${HOME}}:/mnt/host
     restart: unless-stopped

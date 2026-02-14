@@ -133,6 +133,103 @@ class TestPresetStandardWebSearch:
         assert check("tool:web_search:enabled", p) is PermissionResult.DENY
 
 
+class TestDenyPatterns:
+    def test_deny_overrides_allow(self) -> None:
+        profile = PermissionProfile(allow=[".*"], ask=[], deny=[r"tool:bash:rm.*"])
+        assert check("tool:bash:rm -rf /tmp", profile) is PermissionResult.DENY
+        assert check("tool:bash:echo hello", profile) is PermissionResult.ALLOW
+
+    def test_deny_overrides_ask(self) -> None:
+        profile = PermissionProfile(allow=[], ask=[".*"], deny=[r"tool:bash:rm.*"])
+        assert check("tool:bash:rm -rf /tmp", profile) is PermissionResult.DENY
+        assert check("tool:bash:echo hello", profile) is PermissionResult.ASK
+
+    def test_deny_checked_before_allow(self) -> None:
+        profile = PermissionProfile(allow=[r"tool:bash:.*"], ask=[], deny=[r"tool:bash:.*"])
+        assert check("tool:bash:anything", profile) is PermissionResult.DENY
+
+    def test_empty_deny_changes_nothing(self) -> None:
+        profile = PermissionProfile(allow=[r"tool:file:.*"], ask=[r"tool:bash:.*"], deny=[])
+        assert check("tool:file:create /src/app.py", profile) is PermissionResult.ALLOW
+        assert check("tool:bash:ls", profile) is PermissionResult.ASK
+        assert check("tool:self_edit:system_prompt", profile) is PermissionResult.DENY
+
+    def test_invalid_deny_regex_raises(self) -> None:
+        with pytest.raises(InvalidPermissionPatternError):
+            PermissionProfile(allow=[], ask=[], deny=["[invalid"])
+
+
+class TestPresetGuarded:
+    def test_allows_normal_bash(self) -> None:
+        p = get_preset("guarded")
+        assert check("tool:bash:ls -la", p) is PermissionResult.ALLOW
+        assert check("tool:bash:cat README.md", p) is PermissionResult.ALLOW
+
+    def test_allows_file_ops(self) -> None:
+        p = get_preset("guarded")
+        assert check("tool:file:create /src/app.py", p) is PermissionResult.ALLOW
+
+    def test_denies_gh_create(self) -> None:
+        p = get_preset("guarded")
+        assert check("tool:bash:gh pr create --title test", p) is PermissionResult.DENY
+        assert check("tool:bash:gh issue create --body hello", p) is PermissionResult.DENY
+
+    def test_denies_gh_delete(self) -> None:
+        p = get_preset("guarded")
+        assert check("tool:bash:gh release delete v1.0", p) is PermissionResult.DENY
+
+    def test_denies_gh_close_merge(self) -> None:
+        p = get_preset("guarded")
+        assert check("tool:bash:gh pr close 42", p) is PermissionResult.DENY
+        assert check("tool:bash:gh pr merge 42", p) is PermissionResult.DENY
+
+    def test_allows_gh_reads(self) -> None:
+        p = get_preset("guarded")
+        assert check("tool:bash:gh pr list", p) is PermissionResult.ALLOW
+        assert check("tool:bash:gh pr view 42", p) is PermissionResult.ALLOW
+        assert check("tool:bash:gh issue list", p) is PermissionResult.ALLOW
+        assert check("tool:bash:gh repo view", p) is PermissionResult.ALLOW
+
+    def test_denies_gh_api_writes(self) -> None:
+        p = get_preset("guarded")
+        assert check("tool:bash:gh api repos/foo/bar -X POST", p) is PermissionResult.DENY
+        assert check("tool:bash:gh api repos/foo/bar --method DELETE", p) is PermissionResult.DENY
+
+    def test_allows_gh_api_reads(self) -> None:
+        p = get_preset("guarded")
+        assert check("tool:bash:gh api repos/foo/bar", p) is PermissionResult.ALLOW
+
+    def test_denies_doctl_create(self) -> None:
+        p = get_preset("guarded")
+        assert check("tool:bash:doctl compute droplet create myvm", p) is PermissionResult.DENY
+        assert check("tool:bash:doctl apps create --spec app.yaml", p) is PermissionResult.DENY
+
+    def test_denies_doctl_delete(self) -> None:
+        p = get_preset("guarded")
+        assert check("tool:bash:doctl compute droplet delete 123", p) is PermissionResult.DENY
+
+    def test_allows_doctl_reads(self) -> None:
+        p = get_preset("guarded")
+        assert check("tool:bash:doctl compute droplet list", p) is PermissionResult.ALLOW
+        assert check("tool:bash:doctl account get", p) is PermissionResult.ALLOW
+
+    def test_denies_git_push(self) -> None:
+        p = get_preset("guarded")
+        assert check("tool:git:push origin main", p) is PermissionResult.DENY
+
+    def test_denies_git_merge_request(self) -> None:
+        p = get_preset("guarded")
+        assert check("tool:git:merge_request", p) is PermissionResult.DENY
+
+    def test_allows_git_commit(self) -> None:
+        p = get_preset("guarded")
+        assert check("tool:git:commit -m 'init'", p) is PermissionResult.ALLOW
+
+    def test_allows_self_edit(self) -> None:
+        p = get_preset("guarded")
+        assert check("tool:self_edit:system_prompt", p) is PermissionResult.ALLOW
+
+
 class TestPresetLocked:
     def test_allows_file_view(self) -> None:
         p = get_preset("locked")
@@ -153,7 +250,7 @@ class TestPresetLocked:
 
 class TestGetPreset:
     def test_returns_correct_profile(self) -> None:
-        for name in ("open", "standard", "locked"):
+        for name in ("open", "standard", "guarded", "locked"):
             p = get_preset(name)
             assert isinstance(p, PermissionProfile)
             assert p is PRESETS[name]
@@ -229,11 +326,30 @@ class TestEdgeCases:
         d = profile.to_dict()
         assert d == {"allow": [r"tool:file:.*"], "ask": [r"tool:bash:.*"]}
 
+    def test_profile_serialization_with_deny(self) -> None:
+        profile = PermissionProfile(
+            allow=[".*"], ask=[], deny=[r"tool:bash:rm.*"]
+        )
+        d = profile.to_dict()
+        assert d == {"allow": [".*"], "ask": [], "deny": [r"tool:bash:rm.*"]}
+
+    def test_profile_serialization_omits_empty_deny(self) -> None:
+        profile = PermissionProfile(allow=[".*"], ask=[], deny=[])
+        d = profile.to_dict()
+        assert "deny" not in d
+
     def test_profile_deserialization_from_dict(self) -> None:
         d = {"allow": [r"tool:file:.*"], "ask": [r"tool:bash:.*"]}
         profile = PermissionProfile.from_dict(d)
         assert profile.allow == [r"tool:file:.*"]
         assert profile.ask == [r"tool:bash:.*"]
+        assert profile.deny == []
         # Should also have compiled patterns
         assert len(profile._compiled_allow) == 1
         assert len(profile._compiled_ask) == 1
+
+    def test_profile_deserialization_with_deny(self) -> None:
+        d = {"allow": [".*"], "ask": [], "deny": [r"tool:bash:rm.*"]}
+        profile = PermissionProfile.from_dict(d)
+        assert profile.deny == [r"tool:bash:rm.*"]
+        assert len(profile._compiled_deny) == 1
