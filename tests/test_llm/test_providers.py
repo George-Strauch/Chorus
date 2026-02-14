@@ -108,6 +108,7 @@ def _make_openai_text_response(
     usage = MagicMock()
     usage.prompt_tokens = input_tokens
     usage.completion_tokens = output_tokens
+    usage.prompt_tokens_details = None  # No caching by default
 
     resp = MagicMock()
     resp.choices = [choice]
@@ -143,6 +144,7 @@ def _make_openai_tool_response(
     usage = MagicMock()
     usage.prompt_tokens = 20
     usage.completion_tokens = 15
+    usage.prompt_tokens_details = None  # No caching by default
 
     resp = MagicMock()
     resp.choices = [choice]
