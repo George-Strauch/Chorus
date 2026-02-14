@@ -9,7 +9,9 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from chorus.llm.discovery import (
+    KNOWN_ANTHROPIC_MODELS,
     discover_models,
+    get_cached_models,
     read_cache,
     validate_and_discover,
     validate_key,
@@ -99,12 +101,44 @@ class TestKeyValidation:
 
 class TestModelDiscovery:
     @pytest.mark.asyncio
-    async def test_discover_models_anthropic_returns_known_models(self) -> None:
-        models = await discover_models("anthropic", "sk-ant-test")
-        assert isinstance(models, list)
-        assert len(models) > 0
-        # Should contain well-known Claude models
-        assert any("claude" in m for m in models)
+    async def test_discover_anthropic_uses_api(self) -> None:
+        """When models.list() succeeds, returns those models."""
+        m1 = MagicMock()
+        m1.id = "claude-sonnet-4-20250514"
+        m2 = MagicMock()
+        m2.id = "claude-haiku-4-20250506"
+        mock_client = MagicMock()
+        mock_response = MagicMock()
+        mock_response.data = [m1, m2]
+        mock_client.models = MagicMock()
+        mock_client.models.list = AsyncMock(return_value=mock_response)
+
+        models = await discover_models("anthropic", "sk-ant-test", _client=mock_client)
+        assert "claude-sonnet-4-20250514" in models
+        assert "claude-haiku-4-20250506" in models
+        mock_client.models.list.assert_called_once_with(limit=100)
+
+    @pytest.mark.asyncio
+    async def test_discover_anthropic_fallback_on_error(self) -> None:
+        """When models.list() raises, falls back to KNOWN_ANTHROPIC_MODELS."""
+        mock_client = MagicMock()
+        mock_client.models = MagicMock()
+        mock_client.models.list = AsyncMock(side_effect=RuntimeError("API error"))
+
+        models = await discover_models("anthropic", "sk-ant-test", _client=mock_client)
+        assert models == KNOWN_ANTHROPIC_MODELS
+
+    @pytest.mark.asyncio
+    async def test_discover_anthropic_fallback_on_empty(self) -> None:
+        """When models.list() returns empty data, falls back to KNOWN_ANTHROPIC_MODELS."""
+        mock_client = MagicMock()
+        mock_response = MagicMock()
+        mock_response.data = []
+        mock_client.models = MagicMock()
+        mock_client.models.list = AsyncMock(return_value=mock_response)
+
+        models = await discover_models("anthropic", "sk-ant-test", _client=mock_client)
+        assert models == KNOWN_ANTHROPIC_MODELS
 
     @pytest.mark.asyncio
     async def test_discover_models_openai_filters_chat_models(self) -> None:
@@ -184,6 +218,62 @@ class TestCache:
 
 
 # ---------------------------------------------------------------------------
+# get_cached_models
+# ---------------------------------------------------------------------------
+
+
+class TestGetCachedModels:
+    def test_flat_list(self, tmp_path: Path) -> None:
+        cache = {
+            "last_updated": "2026-02-12T10:00:00Z",
+            "providers": {
+                "anthropic": {
+                    "valid": True,
+                    "models": ["claude-sonnet-4-20250514", "claude-haiku-4-20250506"],
+                },
+                "openai": {"valid": True, "models": ["gpt-4o", "gpt-4o-mini"]},
+            },
+        }
+        write_cache(tmp_path, cache)
+        result = get_cached_models(tmp_path)
+        assert result == [
+            "claude-haiku-4-20250506",
+            "claude-sonnet-4-20250514",
+            "gpt-4o",
+            "gpt-4o-mini",
+        ]
+
+    def test_no_cache(self, tmp_path: Path) -> None:
+        result = get_cached_models(tmp_path)
+        assert result == []
+
+    def test_excludes_invalid_providers(self, tmp_path: Path) -> None:
+        cache = {
+            "last_updated": "2026-02-12T10:00:00Z",
+            "providers": {
+                "anthropic": {"valid": True, "models": ["claude-sonnet-4-20250514"]},
+                "openai": {"valid": False, "models": ["gpt-4o"]},
+            },
+        }
+        write_cache(tmp_path, cache)
+        result = get_cached_models(tmp_path)
+        assert result == ["claude-sonnet-4-20250514"]
+        assert "gpt-4o" not in result
+
+    def test_deduplicates_models(self, tmp_path: Path) -> None:
+        cache = {
+            "last_updated": "2026-02-12T10:00:00Z",
+            "providers": {
+                "a": {"valid": True, "models": ["shared-model", "model-a"]},
+                "b": {"valid": True, "models": ["shared-model", "model-b"]},
+            },
+        }
+        write_cache(tmp_path, cache)
+        result = get_cached_models(tmp_path)
+        assert result.count("shared-model") == 1
+
+
+# ---------------------------------------------------------------------------
 # validate_and_discover
 # ---------------------------------------------------------------------------
 
@@ -191,9 +281,15 @@ class TestCache:
 class TestValidateAndDiscover:
     @pytest.mark.asyncio
     async def test_validate_and_discover_writes_cache(self, tmp_path: Path) -> None:
+        m1 = MagicMock()
+        m1.id = "claude-sonnet-4-20250514"
         mock_anth_client = MagicMock()
         mock_anth_client.messages = MagicMock()
         mock_anth_client.messages.create = AsyncMock(return_value=MagicMock())
+        mock_models_response = MagicMock()
+        mock_models_response.data = [m1]
+        mock_anth_client.models = MagicMock()
+        mock_anth_client.models.list = AsyncMock(return_value=mock_models_response)
 
         result = await validate_and_discover(
             tmp_path,
@@ -226,9 +322,15 @@ class TestValidateAndDiscoverIntegration:
     @pytest.mark.asyncio
     async def test_validate_keys_command_updates_cache_file(self, tmp_path: Path) -> None:
         """Calling validate_and_discover writes a cache file that can be read back."""
+        m1 = MagicMock()
+        m1.id = "claude-sonnet-4-20250514"
         mock_anth_client = MagicMock()
         mock_anth_client.messages = MagicMock()
         mock_anth_client.messages.create = AsyncMock(return_value=MagicMock())
+        mock_models_response = MagicMock()
+        mock_models_response.data = [m1]
+        mock_anth_client.models = MagicMock()
+        mock_anth_client.models.list = AsyncMock(return_value=mock_models_response)
 
         await validate_and_discover(
             tmp_path,
@@ -247,9 +349,15 @@ class TestValidateAndDiscoverIntegration:
     @pytest.mark.asyncio
     async def test_validate_keys_reports_per_provider_status(self, tmp_path: Path) -> None:
         """With both keys, result has separate status for each provider."""
+        m1 = MagicMock()
+        m1.id = "claude-sonnet-4-20250514"
         mock_anth_client = MagicMock()
         mock_anth_client.messages = MagicMock()
         mock_anth_client.messages.create = AsyncMock(return_value=MagicMock())
+        mock_models_response = MagicMock()
+        mock_models_response.data = [m1]
+        mock_anth_client.models = MagicMock()
+        mock_anth_client.models.list = AsyncMock(return_value=mock_models_response)
 
         mock_oai_client = MagicMock()
         mock_oai_client.models = MagicMock()

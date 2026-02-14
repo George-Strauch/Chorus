@@ -229,6 +229,86 @@ class TestValidateKeys:
         assert "anthropic" in embed_text.lower()
 
 
+class TestModelAutocomplete:
+    @pytest.mark.asyncio
+    async def test_autocomplete_returns_models_from_cache(
+        self, settings_bot: MagicMock, settings_interaction: MagicMock, tmp_chorus_home: Path
+    ) -> None:
+        from chorus.commands.settings_commands import SettingsCog
+
+        _write_model_cache(tmp_chorus_home, ["claude-sonnet-4-20250514", "gpt-4o", "gpt-4o-mini"])
+        cog = SettingsCog(settings_bot)
+        results = await cog._model_autocomplete(settings_interaction, "")
+        names = [r.name for r in results]
+        assert "claude-sonnet-4-20250514" in names
+        assert "gpt-4o" in names
+
+    @pytest.mark.asyncio
+    async def test_autocomplete_filters_by_current_input(
+        self, settings_bot: MagicMock, settings_interaction: MagicMock, tmp_chorus_home: Path
+    ) -> None:
+        from chorus.commands.settings_commands import SettingsCog
+
+        _write_model_cache(tmp_chorus_home, ["claude-sonnet-4-20250514", "gpt-4o", "gpt-4o-mini"])
+        cog = SettingsCog(settings_bot)
+        results = await cog._model_autocomplete(settings_interaction, "gpt")
+        names = [r.name for r in results]
+        assert "gpt-4o" in names
+        assert "gpt-4o-mini" in names
+        assert "claude-sonnet-4-20250514" not in names
+
+    @pytest.mark.asyncio
+    async def test_autocomplete_caps_at_25(
+        self, settings_bot: MagicMock, settings_interaction: MagicMock, tmp_chorus_home: Path
+    ) -> None:
+        from chorus.commands.settings_commands import SettingsCog
+
+        models = [f"model-{i:03d}" for i in range(30)]
+        _write_model_cache(tmp_chorus_home, models)
+        cog = SettingsCog(settings_bot)
+        results = await cog._model_autocomplete(settings_interaction, "")
+        assert len(results) == 25
+
+    @pytest.mark.asyncio
+    async def test_autocomplete_case_insensitive(
+        self, settings_bot: MagicMock, settings_interaction: MagicMock, tmp_chorus_home: Path
+    ) -> None:
+        from chorus.commands.settings_commands import SettingsCog
+
+        _write_model_cache(tmp_chorus_home, ["claude-sonnet-4-20250514", "GPT-4o"])
+        cog = SettingsCog(settings_bot)
+        results = await cog._model_autocomplete(settings_interaction, "CLAUDE")
+        names = [r.name for r in results]
+        assert "claude-sonnet-4-20250514" in names
+
+
+class TestPermissionsAutocomplete:
+    @pytest.mark.asyncio
+    async def test_autocomplete_returns_presets(
+        self, settings_bot: MagicMock, settings_interaction: MagicMock
+    ) -> None:
+        from chorus.commands.settings_commands import SettingsCog
+
+        cog = SettingsCog(settings_bot)
+        results = await cog._profile_autocomplete(settings_interaction, "")
+        names = [r.name for r in results]
+        assert "open" in names
+        assert "standard" in names
+        assert "locked" in names
+
+    @pytest.mark.asyncio
+    async def test_autocomplete_filters_presets(
+        self, settings_bot: MagicMock, settings_interaction: MagicMock
+    ) -> None:
+        from chorus.commands.settings_commands import SettingsCog
+
+        cog = SettingsCog(settings_bot)
+        results = await cog._profile_autocomplete(settings_interaction, "op")
+        names = [r.name for r in results]
+        assert "open" in names
+        assert "locked" not in names
+
+
 class TestSettingsEphemeral:
     @pytest.mark.asyncio
     async def test_settings_commands_ephemeral_responses(

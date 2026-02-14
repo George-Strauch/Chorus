@@ -30,8 +30,8 @@ KNOWN_ANTHROPIC_MODELS: list[str] = [
     "claude-3-haiku-20240307",
 ]
 
-# Prefixes for OpenAI chat models
-_OPENAI_CHAT_PREFIXES = ("gpt-", "chatgpt-", "o1-", "o3-", "o4-")
+# Prefixes for OpenAI chat models (public for reuse in bot.py)
+OPENAI_CHAT_PREFIXES = ("gpt-", "chatgpt-", "o1-", "o3-", "o4-")
 
 
 # ---------------------------------------------------------------------------
@@ -102,15 +102,33 @@ async def discover_models(
 ) -> list[str]:
     """Discover available models for a provider.
 
-    Anthropic: returns a hardcoded list of known models.
+    Anthropic: queries the models API, falls back to known models on failure.
     OpenAI: queries the models API and filters to chat-capable models.
     """
     if provider_name == "anthropic":
-        return list(KNOWN_ANTHROPIC_MODELS)
+        return await _discover_anthropic(api_key, _client=_client)
     elif provider_name == "openai":
         return await _discover_openai(api_key, _client=_client)
     else:
         return []
+
+
+async def _discover_anthropic(api_key: str, *, _client: Any = None) -> list[str]:
+    """Discover Anthropic models via the API, falling back to KNOWN_ANTHROPIC_MODELS."""
+    if _client is None:
+        import anthropic
+
+        _client = anthropic.AsyncAnthropic(api_key=api_key)
+    try:
+        response = await _client.models.list(limit=100)
+        models = sorted(m.id for m in response.data)
+        if not models:
+            logger.info("Anthropic models.list() returned empty — using fallback")
+            return list(KNOWN_ANTHROPIC_MODELS)
+        return models
+    except Exception:
+        logger.info("Anthropic models.list() failed — using fallback list")
+        return list(KNOWN_ANTHROPIC_MODELS)
 
 
 async def _discover_openai(api_key: str, *, _client: Any = None) -> list[str]:
@@ -121,7 +139,7 @@ async def _discover_openai(api_key: str, *, _client: Any = None) -> list[str]:
     try:
         response = await _client.models.list()
         return sorted(
-            m.id for m in response.data if m.id.startswith(_OPENAI_CHAT_PREFIXES)
+            m.id for m in response.data if m.id.startswith(OPENAI_CHAT_PREFIXES)
         )
     except Exception:
         logger.exception("Failed to discover OpenAI models")
@@ -154,6 +172,25 @@ def write_cache(chorus_home: Path, data: dict[str, Any]) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Cache helpers
+# ---------------------------------------------------------------------------
+
+
+def get_cached_models(chorus_home: Path) -> list[str]:
+    """Read the cache and return a flat, sorted, deduplicated list of all model names."""
+    cache = read_cache(chorus_home)
+    if cache is None:
+        return []
+    providers = cache.get("providers", {})
+    models: set[str] = set()
+    for info in providers.values():
+        if isinstance(info, dict) and info.get("valid"):
+            for m in info.get("models", []):
+                models.add(m)
+    return sorted(models)
+
+
+# ---------------------------------------------------------------------------
 # Combined validate + discover
 # ---------------------------------------------------------------------------
 
@@ -173,7 +210,11 @@ async def validate_and_discover(
         valid = await validate_key(
             "anthropic", anthropic_key, _client=_anthropic_client
         )
-        models = await discover_models("anthropic", anthropic_key) if valid else []
+        models = (
+            await discover_models("anthropic", anthropic_key, _client=_anthropic_client)
+            if valid
+            else []
+        )
         providers["anthropic"] = {"valid": valid, "models": models}
 
     if openai_key:

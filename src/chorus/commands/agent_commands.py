@@ -8,7 +8,10 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from chorus.agent.manager import CONFIGURABLE_KEYS
+from chorus.llm.discovery import get_cached_models
 from chorus.models import AgentExistsError, AgentNotFoundError, InvalidAgentNameError
+from chorus.permissions.engine import PRESETS
 
 logger = logging.getLogger("chorus.commands.agent")
 
@@ -112,6 +115,25 @@ class AgentCog(commands.Cog):
             await channel.delete()
             await interaction.followup.send(str(exc), ephemeral=True)
 
+    @agent_init.autocomplete("model")
+    async def _init_model_autocomplete(
+        self, interaction: discord.Interaction, current: str
+    ) -> list[app_commands.Choice[str]]:
+        chorus_home = self.bot.config.chorus_home  # type: ignore[attr-defined]
+        models = get_cached_models(chorus_home)
+        filtered = [m for m in models if current.lower() in m.lower()]
+        return [app_commands.Choice(name=m, value=m) for m in filtered[:25]]
+
+    @agent_init.autocomplete("permissions")
+    async def _init_permissions_autocomplete(
+        self, interaction: discord.Interaction, current: str
+    ) -> list[app_commands.Choice[str]]:
+        return [
+            app_commands.Choice(name=p, value=p)
+            for p in PRESETS
+            if current.lower() in p.lower()
+        ]
+
     @agent_group.command(name="destroy", description="Destroy an agent")
     @app_commands.describe(name="Agent name to destroy")
     async def agent_destroy(self, interaction: discord.Interaction, name: str) -> None:
@@ -153,6 +175,35 @@ class AgentCog(commands.Cog):
             )
         except (ValueError, AgentNotFoundError) as exc:
             await interaction.response.send_message(str(exc), ephemeral=True)
+
+
+    @agent_config.autocomplete("key")
+    async def _config_key_autocomplete(
+        self, interaction: discord.Interaction, current: str
+    ) -> list[app_commands.Choice[str]]:
+        return [
+            app_commands.Choice(name=k, value=k)
+            for k in sorted(CONFIGURABLE_KEYS)
+            if current.lower() in k.lower()
+        ]
+
+    @agent_config.autocomplete("value")
+    async def _config_value_autocomplete(
+        self, interaction: discord.Interaction, current: str
+    ) -> list[app_commands.Choice[str]]:
+        key = interaction.namespace.key
+        if key == "model":
+            chorus_home = self.bot.config.chorus_home  # type: ignore[attr-defined]
+            models = get_cached_models(chorus_home)
+            filtered = [m for m in models if current.lower() in m.lower()]
+            return [app_commands.Choice(name=m, value=m) for m in filtered[:25]]
+        elif key == "permissions":
+            return [
+                app_commands.Choice(name=p, value=p)
+                for p in PRESETS
+                if current.lower() in p.lower()
+            ]
+        return []
 
 
 async def setup(bot: commands.Bot) -> None:

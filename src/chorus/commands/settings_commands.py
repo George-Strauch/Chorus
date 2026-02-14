@@ -9,7 +9,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from chorus.config import GlobalConfig, validate_model_available
-from chorus.llm.discovery import read_cache, validate_and_discover
+from chorus.llm.discovery import get_cached_models, read_cache, validate_and_discover
 from chorus.permissions.engine import PRESETS
 
 logger = logging.getLogger("chorus.commands.settings")
@@ -46,6 +46,15 @@ class SettingsCog(commands.Cog):
             f"Default model set to **{model}**.", ephemeral=True
         )
 
+    @settings_model.autocomplete("model")
+    async def _model_autocomplete(
+        self, interaction: discord.Interaction, current: str
+    ) -> list[app_commands.Choice[str]]:
+        chorus_home = self.bot.config.chorus_home  # type: ignore[attr-defined]
+        models = get_cached_models(chorus_home)
+        filtered = [m for m in models if current.lower() in m.lower()]
+        return [app_commands.Choice(name=m, value=m) for m in filtered[:25]]
+
     @settings_group.command(name="permissions", description="Set the default permission profile")
     @app_commands.describe(profile="Permission preset name (open/standard/locked)")
     async def settings_permissions(
@@ -65,6 +74,16 @@ class SettingsCog(commands.Cog):
         await interaction.response.send_message(
             f"Default permissions set to **{profile}**.", ephemeral=True
         )
+
+    @settings_permissions.autocomplete("profile")
+    async def _profile_autocomplete(
+        self, interaction: discord.Interaction, current: str
+    ) -> list[app_commands.Choice[str]]:
+        return [
+            app_commands.Choice(name=p, value=p)
+            for p in PRESETS
+            if current.lower() in p.lower()
+        ]
 
     @settings_group.command(name="show", description="Display current settings")
     async def settings_show(self, interaction: discord.Interaction) -> None:

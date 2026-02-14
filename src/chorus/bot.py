@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import pkgutil
@@ -19,6 +20,7 @@ from chorus.agent.directory import AgentDirectory
 from chorus.agent.manager import AgentManager
 from chorus.agent.threads import ExecutionThread, ThreadManager, ThreadRunner, ThreadStatus
 from chorus.config import BotConfig, GlobalConfig
+from chorus.llm.discovery import OPENAI_CHAT_PREFIXES, validate_and_discover
 from chorus.llm.providers import AnthropicProvider, LLMProvider, OpenAIProvider
 from chorus.llm.router import RouteDecision, create_router_provider, route_interjection
 from chorus.llm.tool_loop import (
@@ -56,6 +58,7 @@ class ChorusBot(commands.Bot):
         self._router_provider: LLMProvider | None = None
         self._router_model: str | None = None
         self._presence_manager: BotPresenceManager | None = None
+        self._discovery_task: asyncio.Task[None] | None = None
 
         intents = discord.Intents.default()
         intents.guilds = True
@@ -121,8 +124,38 @@ class ChorusBot(commands.Bot):
         # Initialize presence manager
         self._presence_manager = BotPresenceManager(self)
 
+        # Launch background model discovery
+        self._discovery_task = asyncio.create_task(self._run_startup_discovery())
+
+    async def _run_startup_discovery(self) -> None:
+        """Run model discovery in the background on startup."""
+        try:
+            result = await asyncio.wait_for(
+                validate_and_discover(
+                    self.config.chorus_home,
+                    anthropic_key=self.config.anthropic_api_key,
+                    openai_key=self.config.openai_api_key,
+                ),
+                timeout=30,
+            )
+            providers = result.get("providers", {})
+            total = sum(
+                len(p.get("models", [])) for p in providers.values() if p.get("valid")
+            )
+            logger.info(
+                "Startup discovery: %d models from %d providers", total, len(providers)
+            )
+        except TimeoutError:
+            logger.warning("Startup model discovery timed out after 30s")
+        except asyncio.CancelledError:
+            logger.info("Startup model discovery cancelled")
+        except Exception:
+            logger.exception("Startup model discovery failed")
+
     async def close(self) -> None:
-        """Kill all threads, shut down database, and disconnect."""
+        """Kill all threads, cancel discovery, shut down database, and disconnect."""
+        if self._discovery_task is not None and not self._discovery_task.done():
+            self._discovery_task.cancel()
         for tm in self._thread_managers.values():
             await tm.kill_all()
         if hasattr(self, "db"):
@@ -367,7 +400,7 @@ class ChorusBot(commands.Bot):
             # Choose provider based on model name
             model = agent.model or self.global_config.default_model or "claude-sonnet-4-20250514"
             provider: AnthropicProvider | OpenAIProvider
-            if model.startswith(("gpt-", "o1-", "o3-", "o4-")):
+            if model.startswith(OPENAI_CHAT_PREFIXES):
                 if not self.config.openai_api_key:
                     await message.channel.send("No OpenAI API key configured.")
                     return
@@ -435,8 +468,9 @@ class ChorusBot(commands.Bot):
 
             # Build ask_callback for ASK permission prompts
             async def _ask_callback(tool_name: str, arguments: str) -> bool:
-                from chorus.llm.tool_loop import _build_action_string
                 import json as _json
+
+                from chorus.llm.tool_loop import _build_action_string
                 try:
                     args = _json.loads(arguments)
                 except (ValueError, TypeError):

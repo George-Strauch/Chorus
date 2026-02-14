@@ -2,10 +2,17 @@
 
 from __future__ import annotations
 
+import json
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock
+
+import pytest
 
 from chorus.commands.agent_commands import AgentCog
 from chorus.models import Agent, InvalidAgentNameError
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 class TestPing:
@@ -146,3 +153,102 @@ class TestAgentConfig:
         interaction.response.send_message.assert_called_once()
         msg = interaction.response.send_message.call_args[0][0]
         assert "test-bot" in msg
+
+
+def _write_model_cache(chorus_home: Path, models: list[str]) -> None:
+    """Write a fake available_models.json cache."""
+    cache = {
+        "last_updated": "2026-02-12T10:00:00Z",
+        "providers": {
+            "anthropic": {"valid": True, "models": models},
+        },
+    }
+    (chorus_home / "available_models.json").write_text(json.dumps(cache))
+
+
+class TestConfigKeyAutocomplete:
+    @pytest.mark.asyncio
+    async def test_key_autocomplete_returns_configurable_keys(self, mock_bot: MagicMock) -> None:
+        interaction = MagicMock()
+        cog = AgentCog(mock_bot)
+        results = await cog._config_key_autocomplete(interaction, "")
+        names = [r.name for r in results]
+        assert "model" in names
+        assert "permissions" in names
+        assert "system_prompt" in names
+
+    @pytest.mark.asyncio
+    async def test_key_autocomplete_filters(self, mock_bot: MagicMock) -> None:
+        interaction = MagicMock()
+        cog = AgentCog(mock_bot)
+        results = await cog._config_key_autocomplete(interaction, "mod")
+        names = [r.name for r in results]
+        assert "model" in names
+        assert "permissions" not in names
+
+
+class TestConfigValueAutocomplete:
+    @pytest.mark.asyncio
+    async def test_value_autocomplete_model_returns_models(
+        self, mock_bot: MagicMock, tmp_chorus_home: Path
+    ) -> None:
+        _write_model_cache(tmp_chorus_home, ["claude-sonnet-4-20250514", "gpt-4o"])
+        interaction = MagicMock()
+        interaction.namespace = MagicMock()
+        interaction.namespace.key = "model"
+        cog = AgentCog(mock_bot)
+        results = await cog._config_value_autocomplete(interaction, "")
+        names = [r.name for r in results]
+        assert "claude-sonnet-4-20250514" in names
+        assert "gpt-4o" in names
+
+    @pytest.mark.asyncio
+    async def test_value_autocomplete_permissions_returns_presets(
+        self, mock_bot: MagicMock
+    ) -> None:
+        interaction = MagicMock()
+        interaction.namespace = MagicMock()
+        interaction.namespace.key = "permissions"
+        cog = AgentCog(mock_bot)
+        results = await cog._config_value_autocomplete(interaction, "")
+        names = [r.name for r in results]
+        assert "open" in names
+        assert "standard" in names
+        assert "locked" in names
+
+    @pytest.mark.asyncio
+    async def test_value_autocomplete_other_key_returns_empty(
+        self, mock_bot: MagicMock
+    ) -> None:
+        interaction = MagicMock()
+        interaction.namespace = MagicMock()
+        interaction.namespace.key = "system_prompt"
+        cog = AgentCog(mock_bot)
+        results = await cog._config_value_autocomplete(interaction, "")
+        assert results == []
+
+
+class TestInitModelAutocomplete:
+    @pytest.mark.asyncio
+    async def test_init_model_autocomplete(
+        self, mock_bot: MagicMock, tmp_chorus_home: Path
+    ) -> None:
+        _write_model_cache(tmp_chorus_home, ["claude-sonnet-4-20250514", "gpt-4o"])
+        interaction = MagicMock()
+        cog = AgentCog(mock_bot)
+        results = await cog._init_model_autocomplete(interaction, "claude")
+        names = [r.name for r in results]
+        assert "claude-sonnet-4-20250514" in names
+        assert "gpt-4o" not in names
+
+
+class TestInitPermissionsAutocomplete:
+    @pytest.mark.asyncio
+    async def test_init_permissions_autocomplete(self, mock_bot: MagicMock) -> None:
+        interaction = MagicMock()
+        cog = AgentCog(mock_bot)
+        results = await cog._init_permissions_autocomplete(interaction, "")
+        names = [r.name for r in results]
+        assert "open" in names
+        assert "standard" in names
+        assert "locked" in names
