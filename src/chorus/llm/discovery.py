@@ -41,8 +41,6 @@ _OPENAI_NON_CHAT_SUFFIXES = (
     "-audio",
     "-image",
     "-search",
-    "-codex",
-    "-deep-research",
     "-instruct",
     "-diarize",
 )
