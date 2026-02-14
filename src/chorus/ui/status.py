@@ -66,11 +66,69 @@ def format_response_footer(snapshot: StatusSnapshot) -> str:
     return "*" + " \u00b7 ".join(parts) + "*"
 
 
-def _truncate_response(content: str, max_len: int = 1900) -> str:
-    """Truncate response to fit Discord's 2000-char message limit with room for footer."""
-    if len(content) <= max_len:
-        return content
-    return content[:max_len] + "\u2026"
+_MAX_CHUNK = 1900
+_MAX_CHUNKS = 10
+
+
+def _find_split_point(text: str, max_len: int) -> int:
+    """Find the best split point within *text* before *max_len*.
+
+    Priority: paragraph break (\\n\\n) > line break (\\n) > sentence end ('. ')
+    > hard cut.  If the candidate split would break an open code fence
+    (odd number of ``` before the point), back up before the opening fence.
+    """
+    # Try paragraph break
+    idx = text.rfind("\n\n", 0, max_len)
+    if idx > 0:
+        split = idx + 1  # keep one newline on left side
+    else:
+        # Try line break
+        idx = text.rfind("\n", 0, max_len)
+        if idx > 0:
+            split = idx + 1
+        else:
+            # Try sentence end
+            idx = text.rfind(". ", 0, max_len)
+            split = idx + 2 if idx > 0 else max_len
+
+    # Code-block protection: if odd number of ``` before split, back up
+    before = text[:split]
+    if before.count("```") % 2 == 1:
+        fence_start = before.rfind("```")
+        if fence_start > 0:
+            split = fence_start
+
+    return split
+
+
+def chunk_response(content: str, max_chunk: int = _MAX_CHUNK) -> list[str]:
+    """Split *content* into Discord-safe chunks."""
+    if len(content) <= max_chunk:
+        return [content]
+
+    chunks: list[str] = []
+    remaining = content
+    while remaining:
+        if len(chunks) >= _MAX_CHUNKS - 1:
+            # Last allowed chunk — include everything remaining (may be truncated below)
+            chunks.append(remaining)
+            break
+        if len(remaining) <= max_chunk:
+            chunks.append(remaining)
+            break
+        split_at = _find_split_point(remaining, max_chunk)
+        chunks.append(remaining[:split_at].rstrip())
+        remaining = remaining[split_at:].lstrip()
+
+    # Truncate if final chunk is still too long after max chunks reached
+    if len(chunks) == _MAX_CHUNKS and len(chunks[-1]) > max_chunk:
+        omitted = len(chunks[-1]) - max_chunk + 60  # room for notice
+        chunks[-1] = (
+            chunks[-1][:max_chunk - 60]
+            + f"\n\n*(response truncated — {omitted:,} characters omitted)*"
+        )
+
+    return chunks
 
 
 # ---------------------------------------------------------------------------
@@ -136,6 +194,7 @@ class LiveStatusView:
         self._message: discord.Message | None = None
         self._started_at: float | None = None
         self._ticker_task: asyncio.Task[None] | None = None
+        self._chunk_message_ids: list[int] = []
 
     @staticmethod
     def _default_clock() -> float:
@@ -145,6 +204,11 @@ class LiveStatusView:
     def message(self) -> discord.Message | None:
         """The underlying Discord message (None until start() succeeds)."""
         return self._message
+
+    @property
+    def chunk_message_ids(self) -> list[int]:
+        """All Discord message IDs from a chunked response."""
+        return list(self._chunk_message_ids)
 
     async def start(self) -> None:
         """Send the initial 'Thinking...' message and start the ticker."""
@@ -200,10 +264,14 @@ class LiveStatusView:
     ) -> None:
         """Stop the ticker and deliver the final response.
 
-        - <15s: edit the message in-place with the response.
-        - >=15s: send a NEW message with the response.
+        Long responses are split into multiple Discord messages.
+        The footer is appended only to the last chunk.
+
+        - <15s and single chunk: edit the message in-place.
+        - Otherwise: send new message(s).
         """
         self._stop_ticker()
+        self._chunk_message_ids = []
 
         self._snapshot.status = status
         if error:
@@ -217,34 +285,52 @@ class LiveStatusView:
             elapsed = self._clock() - self._started_at
             self._snapshot.elapsed_ms = int(elapsed * 1000)
 
-        # Build the response text
-        content = self._build_final_text()
+        # Build content chunks
+        body = self._build_response_body()
+        footer = format_response_footer(self._snapshot)
+        chunks = chunk_response(body)
 
-        # Decide: edit-in-place or new message
+        # Append footer to the last chunk
+        last_with_footer = chunks[-1] + "\n" + footer
+        if len(last_with_footer) <= _MAX_CHUNK + 200:  # footer is ~100 chars
+            chunks[-1] = last_with_footer
+        else:
+            chunks.append(footer)
+
+        # Decide: edit-in-place or new message for first chunk
         elapsed_s = (
             (self._snapshot.elapsed_ms / 1000)
             if self._snapshot.elapsed_ms
             else 0
         )
-        if elapsed_s < _RESPONSE_EDIT_THRESHOLD_S and self._message is not None:
-            # Edit in-place
+        first_chunk = chunks[0]
+        is_quick_single = (
+            elapsed_s < _RESPONSE_EDIT_THRESHOLD_S
+            and self._message is not None
+            and len(chunks) == 1
+        )
+        if is_quick_single:
+            # Single chunk, fast response — edit in-place
             try:
-                await self._message.edit(content=content, embed=None)
+                await self._message.edit(content=first_chunk, embed=None)
+                self._chunk_message_ids.append(self._message.id)
             except Exception:
                 logger.warning("Failed to edit response message", exc_info=True)
         else:
-            # Send new message
-            try:
-                kwargs: dict[str, Any] = {"content": content}
-                if self._reference is not None:
-                    kwargs["reference"] = self._reference
-                new_msg = await self._channel.send(**kwargs)
-                self._message = new_msg
-            except Exception:
-                logger.warning("Failed to send response message", exc_info=True)
+            # Send all chunks as new messages
+            for chunk in chunks:
+                try:
+                    kwargs: dict[str, Any] = {"content": chunk}
+                    if self._reference is not None and not self._chunk_message_ids:
+                        kwargs["reference"] = self._reference
+                    new_msg = await self._channel.send(**kwargs)
+                    self._message = new_msg
+                    self._chunk_message_ids.append(new_msg.id)
+                except Exception:
+                    logger.warning("Failed to send response chunk", exc_info=True)
 
-    def _build_final_text(self) -> str:
-        """Build the final message text: response + footer."""
+    def _build_response_body(self) -> str:
+        """Build the response body without footer (chunking happens in finalize)."""
         snap = self._snapshot
         parts: list[str] = []
 
@@ -252,14 +338,10 @@ class LiveStatusView:
             parts.append(f"**Error:** {snap.error_message}")
 
         if snap.response_content:
-            parts.append(_truncate_response(snap.response_content))
+            parts.append(snap.response_content)
 
         if not parts:
             parts.append("*(no response)*")
-
-        # Add footer
-        footer = format_response_footer(snap)
-        parts.append(footer)
 
         return "\n".join(parts)
 

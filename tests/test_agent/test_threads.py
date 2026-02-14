@@ -447,16 +447,6 @@ class TestMainThread:
         with pytest.raises(ValueError, match="Unknown thread"):
             thread_manager.set_main_thread(999)
 
-    def test_break_main_thread(self, thread_manager: ThreadManager) -> None:
-        thread = thread_manager.create_thread({"role": "user", "content": "hello"})
-        thread_manager.set_main_thread(thread.id)
-        thread_manager.break_main_thread()
-        assert thread_manager.get_main_thread() is None
-
-    def test_break_when_no_main_is_noop(self, thread_manager: ThreadManager) -> None:
-        thread_manager.break_main_thread()  # should not raise
-        assert thread_manager.get_main_thread() is None
-
     def test_main_thread_survives_new_threads(self, thread_manager: ThreadManager) -> None:
         t1 = thread_manager.create_thread({"role": "user", "content": "a"})
         thread_manager.set_main_thread(t1.id)
@@ -622,27 +612,3 @@ class TestBranchPersistence:
         assert t2.id == 2
         assert tm._next_id == 3
 
-    async def test_get_or_create_current_branch_creates_when_no_main(
-        self, thread_manager_with_db: ThreadManager
-    ) -> None:
-        tm = thread_manager_with_db
-        assert tm.get_main_thread() is None
-        thread = await tm.get_or_create_current_branch(
-            {"role": "user", "content": "hello"}
-        )
-        assert thread is not None
-        assert thread.id >= 1
-        assert tm.get_main_thread() is thread
-
-    async def test_get_or_create_current_branch_returns_existing(
-        self, thread_manager_with_db: ThreadManager
-    ) -> None:
-        tm = thread_manager_with_db
-        t1 = await tm.get_or_create_current_branch(
-            {"role": "user", "content": "first"}
-        )
-        t2 = await tm.get_or_create_current_branch(
-            {"role": "user", "content": "second"}
-        )
-        # Should return the same thread since it's still active
-        assert t1.id == t2.id

@@ -22,8 +22,7 @@ from chorus.agent.manager import AgentManager
 from chorus.agent.threads import ExecutionThread, ThreadManager, ThreadRunner, ThreadStatus
 from chorus.config import BotConfig, GlobalConfig
 from chorus.llm.discovery import OPENAI_CHAT_PREFIXES, get_cached_models, validate_and_discover
-from chorus.llm.providers import AnthropicProvider, LLMProvider, OpenAIProvider
-from chorus.llm.router import RouteDecision, create_router_provider, route_interjection
+from chorus.llm.providers import AnthropicProvider, OpenAIProvider
 from chorus.llm.tool_loop import (
     ToolExecutionContext,
     ToolLoopEvent,
@@ -56,8 +55,6 @@ class ChorusBot(commands.Bot):
         self._channel_to_agent: dict[int, str] = {}
         self._message_queues: dict[int, ChannelMessageQueue] = {}
         self._test_channel: discord.TextChannel | None = None
-        self._router_provider: LLMProvider | None = None
-        self._router_model: str | None = None
         self._presence_manager: BotPresenceManager | None = None
         self._discovery_task: asyncio.Task[None] | None = None
 
@@ -308,84 +305,21 @@ class ChorusBot(commands.Bot):
                     tm.start_thread(thread, runner=runner)
                 return
 
-        # ── Main thread routing (non-reply messages) ─────────────────────
-        main_thread = tm.get_main_thread()
-
-        # Check idle timeout — if idle >3h, force a new branch
-        is_idle = await tm.check_idle_timeout()
-        if is_idle and main_thread is not None and main_thread.status != ThreadStatus.RUNNING:
-            # Generate summary for the previous branch before creating new one
-            await self._generate_branch_summary(agent_name, main_thread.id, cm)
-            main_thread = None  # Force new branch creation below
-
-        if main_thread is None or main_thread.status == ThreadStatus.COMPLETED:
-            # Generate summary for completed branch if it has one
-            if main_thread is not None and main_thread.status == ThreadStatus.COMPLETED:
-                await self._generate_branch_summary(agent_name, main_thread.id, cm)
-
-            # Create a new branch
-            thread = await tm.create_branch(
-                {"role": "user", "content": message.content}, is_main=True
-            )
-            await cm.persist_message(
-                role="user",
-                content=message.content,
-                thread_id=thread.id,
-                discord_message_id=message.id,
-            )
-            await self._update_branch_last_message(agent_name, thread.id)
-            agent = await self.agent_manager.get_agent_by_channel(message.channel.id)
-            if agent is None:
-                return
-            runner = self._make_llm_runner(agent, tm, cm, message, thread)
-            tm.start_thread(thread, runner=runner)
-
-        elif main_thread.status == ThreadStatus.RUNNING:
-            # Main thread is busy — ask router whether to inject or spin up new thread
-            decision = await self._route_interjection(message.content, main_thread)
-            if decision is RouteDecision.INJECT:
-                main_thread.inject_queue.put_nowait({"role": "user", "content": message.content})
-                await cm.persist_message(
-                    role="user",
-                    content=message.content,
-                    thread_id=main_thread.id,
-                    discord_message_id=message.id,
-                )
-                await self._update_branch_last_message(agent_name, main_thread.id)
-            else:
-                # NEW_THREAD — generate summary for current and create a new branch
-                await self._generate_branch_summary(agent_name, main_thread.id, cm)
-                thread = await tm.create_branch(
-                    {"role": "user", "content": message.content}
-                )
-                await cm.persist_message(
-                    role="user",
-                    content=message.content,
-                    thread_id=thread.id,
-                    discord_message_id=message.id,
-                )
-                await self._update_branch_last_message(agent_name, thread.id)
-                agent = await self.agent_manager.get_agent_by_channel(message.channel.id)
-                if agent is None:
-                    return
-                runner = self._make_llm_runner(agent, tm, cm, message, thread)
-                tm.start_thread(thread, runner=runner)
-
-        else:
-            # IDLE or WAITING_FOR_PERMISSION — append to main thread and start
-            main_thread.messages.append({"role": "user", "content": message.content})
-            await cm.persist_message(
-                role="user",
-                content=message.content,
-                thread_id=main_thread.id,
-                discord_message_id=message.id,
-            )
-            await self._update_branch_last_message(agent_name, main_thread.id)
-            agent = await self.agent_manager.get_agent_by_channel(message.channel.id)
-            if agent is None:
-                return
-            runner = self._make_llm_runner(agent, tm, cm, message, main_thread)
-            tm.start_thread(main_thread, runner=runner)
+        # ── Non-reply: always create a new branch ─────────────────────────
+        thread = await tm.create_branch({"role": "user", "content": message.content})
+        await cm.persist_message(
+            role="user",
+            content=message.content,
+            thread_id=thread.id,
+            discord_message_id=message.id,
+        )
+        await self._update_branch_last_message(agent_name, thread.id)
+        await self._generate_branch_summary(agent_name, thread.id, message.content)
+        agent = await self.agent_manager.get_agent_by_channel(message.channel.id)
+        if agent is None:
+            return
+        runner = self._make_llm_runner(agent, tm, cm, message, thread)
+        tm.start_thread(thread, runner=runner)
 
     async def _update_branch_last_message(self, agent_name: str, branch_id: int) -> None:
         """Update last_message_at for a branch in the DB."""
@@ -397,76 +331,16 @@ class ChorusBot(commands.Bot):
             logger.debug("Failed to update branch last_message_at", exc_info=True)
 
     async def _generate_branch_summary(
-        self, agent_name: str, branch_id: int, cm: ContextManager
+        self, agent_name: str, branch_id: int, first_message: str
     ) -> None:
-        """Generate a max 5-word summary for a branch using the router model."""
+        """Set a short text summary for a branch from the first message."""
+        summary = first_message[:50].strip()
+        if len(first_message) > 50:
+            summary += "..."
         try:
-            # Check if summary already exists
-            branch = await self.db.get_branch(agent_name, branch_id)
-            if branch and branch.get("summary"):
-                return  # Already has a summary
-
-            # Get recent messages for this branch
-            messages = await cm.get_context(thread_id=branch_id)
-            if not messages:
-                return
-
-            # Build a summary request
-            user_msgs = [m.get("content", "") for m in messages if m.get("role") == "user"]
-            if not user_msgs:
-                return
-
-            # Use router provider for cheap summary
-            if self._router_provider is None:
-                try:
-                    self._router_provider, self._router_model = create_router_provider(
-                        anthropic_key=self.config.anthropic_api_key,
-                        openai_key=self.config.openai_api_key,
-                    )
-                except ValueError:
-                    return  # No API keys
-
-            assert self._router_model is not None
-            summary_prompt = (
-                "Summarize this conversation in EXACTLY 5 words or fewer. "
-                "Just the summary, no quotes or punctuation:\n\n"
-                + "\n".join(user_msgs[:5])  # First 5 user messages
-            )
-            response = await self._router_provider.chat(
-                messages=[{"role": "user", "content": summary_prompt}],
-                model=self._router_model,
-            )
-            summary = (response.content or "").strip()[:50]  # Cap at 50 chars
-            if summary:
-                await self.db.set_branch_summary(agent_name, branch_id, summary)
+            await self.db.set_branch_summary(agent_name, branch_id, summary)
         except Exception:
-            logger.debug("Failed to generate branch summary", exc_info=True)
-
-    async def _route_interjection(
-        self,
-        content: str,
-        thread: ExecutionThread,
-    ) -> RouteDecision:
-        """Decide whether to inject a message into a running thread or start a new one."""
-        if self._router_provider is None:
-            try:
-                self._router_provider, self._router_model = create_router_provider(
-                    anthropic_key=self.config.anthropic_api_key,
-                    openai_key=self.config.openai_api_key,
-                )
-            except ValueError:
-                # No API keys for router — default to INJECT
-                logger.warning("No API keys available for router — defaulting to INJECT")
-                return RouteDecision.INJECT
-
-        assert self._router_model is not None
-        return await route_interjection(
-            message=content,
-            thread_summary=thread.summary or "Working...",
-            current_step=thread.metrics.current_step,
-            provider=self._router_provider,
-            model=self._router_model,
-        )
+            logger.debug("Failed to set branch summary", exc_info=True)
 
     def _make_llm_runner(
         self,
@@ -614,7 +488,11 @@ class ChorusBot(commands.Bot):
                     "completed", response_content=result.content
                 )
 
-                # Persist assistant message using the status view message
+                # Register all chunk message IDs for reply-based routing
+                for msg_id in status_view.chunk_message_ids:
+                    tm.register_bot_message(msg_id, thread.id)
+
+                # Persist assistant message using the last message ID
                 if result.content and status_view.message is not None:
                     await cm.persist_message(
                         role="assistant",

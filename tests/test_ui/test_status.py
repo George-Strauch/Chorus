@@ -14,6 +14,7 @@ from chorus.ui.status import (
     BotPresenceManager,
     LiveStatusView,
     StatusSnapshot,
+    chunk_response,
     format_response_footer,
     format_status_line,
 )
@@ -614,3 +615,209 @@ class TestBotPresenceManager:
         call_kwargs = bot.change_presence.call_args
         activity = call_kwargs.kwargs.get("activity") or call_kwargs.args[0]
         assert "1" in activity.name
+
+
+# ---------------------------------------------------------------------------
+# chunk_response
+# ---------------------------------------------------------------------------
+
+
+class TestChunkResponse:
+    def test_short_content_single_chunk(self) -> None:
+        result = chunk_response("Hello world")
+        assert result == ["Hello world"]
+
+    def test_exact_limit_single_chunk(self) -> None:
+        content = "x" * 1900
+        result = chunk_response(content)
+        assert len(result) == 1
+
+    def test_splits_on_paragraph(self) -> None:
+        part1 = "A" * 1000
+        part2 = "B" * 1000
+        content = part1 + "\n\n" + part2
+        result = chunk_response(content)
+        assert len(result) == 2
+        assert result[0].strip() == part1
+        assert result[1].strip() == part2
+
+    def test_splits_on_newline(self) -> None:
+        part1 = "A" * 1000
+        part2 = "B" * 1000
+        content = part1 + "\n" + part2
+        result = chunk_response(content)
+        assert len(result) == 2
+
+    def test_splits_on_sentence(self) -> None:
+        part1 = "A" * 1000
+        part2 = "B" * 1000
+        content = part1 + ". " + part2
+        result = chunk_response(content)
+        assert len(result) == 2
+
+    def test_hard_cut_no_boundaries(self) -> None:
+        content = "A" * 3000
+        result = chunk_response(content)
+        assert len(result) == 2
+        assert len(result[0]) == 1900
+        assert result[1] == "A" * 1100
+
+    def test_preserves_code_blocks(self) -> None:
+        """Should not split in the middle of a code fence block."""
+        code_block = "```python\n" + "x = 1\n" * 100 + "```"
+        prefix = "A" * (1900 - 50)  # Leave room so the split point lands inside the block
+        content = prefix + "\n" + code_block
+        result = chunk_response(content)
+        # The code block should not be split — it should be in one chunk
+        for chunk in result:
+            count = chunk.count("```")
+            assert count % 2 == 0 or count == 0, f"Odd code fences in chunk: {count}"
+
+    def test_max_chunks_truncation(self) -> None:
+        # 10 chunks * 1900 = 19000, so 25000 chars should trigger truncation
+        content = "A" * 25000
+        result = chunk_response(content)
+        assert len(result) <= 10
+        # Last chunk should contain truncation notice
+        assert "truncated" in result[-1]
+
+    def test_empty_content(self) -> None:
+        result = chunk_response("")
+        assert result == [""]
+
+    def test_custom_max_chunk(self) -> None:
+        content = "A" * 200
+        result = chunk_response(content, max_chunk=100)
+        assert len(result) == 2
+        assert len(result[0]) == 100
+
+
+# ---------------------------------------------------------------------------
+# Finalize multi-chunk
+# ---------------------------------------------------------------------------
+
+
+class TestFinalizeMultiChunk:
+    @pytest.mark.asyncio
+    async def test_multi_chunk_sends_multiple_messages(self) -> None:
+        """Response over 1900 chars sends multiple Discord messages."""
+        channel = _make_mock_channel()
+        msgs: list[MagicMock] = []
+        call_count = 0
+
+        async def _send(**kwargs: Any) -> MagicMock:
+            nonlocal call_count
+            m = MagicMock(spec=discord.Message)
+            m.id = 10000 + call_count
+            m.edit = AsyncMock()
+            msgs.append(m)
+            call_count += 1
+            return m
+
+        channel.send = AsyncMock(side_effect=_send)
+        clock = FakeClock()
+        view = LiveStatusView(
+            channel=channel,
+            agent_name="test-agent",
+            thread_id=1,
+            get_active_count=lambda: 1,
+            _clock=clock,
+        )
+        await view.start()
+        clock.advance(20.0)  # >15s so we send new messages
+        long_content = "A" * 1000 + "\n\n" + "B" * 1000 + "\n\n" + "C" * 1000
+        await view.finalize("completed", response_content=long_content)
+        # Should have sent multiple messages (1 thinking + N chunks)
+        assert channel.send.call_count >= 3  # thinking + at least 2 chunks
+
+    @pytest.mark.asyncio
+    async def test_multi_chunk_footer_on_last_only(self) -> None:
+        """Footer (branch #N ...) should only appear on the last message."""
+        channel = _make_mock_channel()
+        msgs: list[MagicMock] = []
+        call_count = 0
+
+        async def _send(**kwargs: Any) -> MagicMock:
+            nonlocal call_count
+            m = MagicMock(spec=discord.Message)
+            m.id = 10000 + call_count
+            m.edit = AsyncMock()
+            m._content = kwargs.get("content", "")
+            msgs.append(m)
+            call_count += 1
+            return m
+
+        channel.send = AsyncMock(side_effect=_send)
+        clock = FakeClock()
+        view = LiveStatusView(
+            channel=channel,
+            agent_name="test-agent",
+            thread_id=1,
+            get_active_count=lambda: 1,
+            _clock=clock,
+        )
+        await view.start()
+        clock.advance(20.0)
+        long_content = "A" * 1000 + "\n\n" + "B" * 1500
+        await view.finalize("completed", response_content=long_content)
+        # Get the content of each send call (skip thinking message)
+        sent_contents = [
+            call.kwargs.get("content", "") for call in channel.send.call_args_list[1:]
+        ]
+        assert len(sent_contents) >= 2
+        # Only the last should contain the footer
+        for content in sent_contents[:-1]:
+            assert "branch #" not in content
+        assert "branch #1" in sent_contents[-1]
+
+    @pytest.mark.asyncio
+    async def test_multi_chunk_message_ids_tracked(self) -> None:
+        """All message IDs should be available via chunk_message_ids property."""
+        channel = _make_mock_channel()
+        call_count = 0
+
+        async def _send(**kwargs: Any) -> MagicMock:
+            nonlocal call_count
+            m = MagicMock(spec=discord.Message)
+            m.id = 10000 + call_count
+            m.edit = AsyncMock()
+            call_count += 1
+            return m
+
+        channel.send = AsyncMock(side_effect=_send)
+        clock = FakeClock()
+        view = LiveStatusView(
+            channel=channel,
+            agent_name="test-agent",
+            thread_id=1,
+            get_active_count=lambda: 1,
+            _clock=clock,
+        )
+        await view.start()
+        clock.advance(20.0)
+        long_content = "A" * 1000 + "\n\n" + "B" * 1500
+        await view.finalize("completed", response_content=long_content)
+        ids = view.chunk_message_ids
+        assert len(ids) >= 2
+        # All IDs should be unique
+        assert len(set(ids)) == len(ids)
+
+    @pytest.mark.asyncio
+    async def test_single_chunk_edit_in_place(self) -> None:
+        """Short response under 15s should edit in place and track message ID."""
+        channel = _make_mock_channel()
+        clock = FakeClock()
+        view = LiveStatusView(
+            channel=channel,
+            agent_name="test-agent",
+            thread_id=1,
+            get_active_count=lambda: 1,
+            _clock=clock,
+        )
+        await view.start()
+        clock.advance(5.0)
+        await view.finalize("completed", response_content="Short response")
+        msg = channel.send.return_value
+        msg.edit.assert_called_once()
+        assert len(view.chunk_message_ids) == 1
+        assert view.chunk_message_ids[0] == msg.id

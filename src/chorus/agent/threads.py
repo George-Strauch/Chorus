@@ -161,43 +161,6 @@ class ThreadManager:
             last_msg_dt = last_msg_dt.replace(tzinfo=UTC)
         return (datetime.now(UTC) - last_msg_dt) > timedelta(seconds=IDLE_TIMEOUT_SECONDS)
 
-    async def get_or_create_current_branch(
-        self, initial_message: dict[str, Any]
-    ) -> ExecutionThread:
-        """Get the current main branch or create a new one.
-
-        Creates a new branch if:
-        - No branches exist (first message ever)
-        - Idle timeout exceeded (>3h since last message)
-        - Main thread is None or completed
-        """
-        await self.initialize()
-
-        # Check if main thread exists and is still usable
-        main_thread = self.get_main_thread()
-        if main_thread is not None and main_thread.status != ThreadStatus.COMPLETED:
-            return main_thread
-
-        # Check idle timeout
-        needs_new = await self.check_idle_timeout()
-
-        if not needs_new and main_thread is not None:
-            # Main thread completed, but not idle — still create new
-            needs_new = True
-
-        if not needs_new:
-            # Check if any branches exist at all
-            if self._db is not None:
-                latest = await self._db.get_latest_branch_id(self._agent_name)
-                if latest is None:
-                    needs_new = True
-                else:
-                    needs_new = True  # main is None/completed → new branch
-            else:
-                needs_new = True
-
-        return await self.create_branch(initial_message, is_main=True)
-
     async def create_branch(
         self, initial_message: dict[str, Any], *, is_main: bool = False
     ) -> ExecutionThread:
@@ -308,10 +271,6 @@ class ThreadManager:
         if thread_id not in self._threads:
             raise ValueError(f"Unknown thread #{thread_id}")
         self._main_thread_id = thread_id
-
-    def break_main_thread(self) -> None:
-        """Detach the main thread (does NOT kill it)."""
-        self._main_thread_id = None
 
     async def kill_thread(self, thread_id: int) -> bool:
         """Cancel a running thread's task and mark it completed."""
