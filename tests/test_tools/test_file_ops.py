@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
@@ -11,9 +12,9 @@ from chorus.tools.file_ops import (
     AmbiguousMatchError,
     BinaryFileError,
     FileNotFoundInWorkspaceError,
-    PathTraversalError,
     StringNotFoundError,
     create_file,
+    resolve_path,
     str_replace,
     view,
 )
@@ -53,28 +54,19 @@ class TestCreateFile:
         assert (workspace_dir / "hello.txt").read_text(encoding="utf-8") == "overwritten"
 
     @pytest.mark.asyncio
-    async def test_create_file_rejects_path_traversal_dotdot(
-        self, workspace_dir: Path
-    ) -> None:
-        with pytest.raises(PathTraversalError):
-            await create_file(workspace_dir, "../../etc/passwd", "evil")
+    async def test_create_file_with_absolute_path(self, tmp_path: Path) -> None:
+        target = tmp_path / "outside" / "abs.txt"
+        result = await create_file(tmp_path / "workspace", str(target), "absolute")
+        assert result.success is True
+        assert target.read_text(encoding="utf-8") == "absolute"
 
     @pytest.mark.asyncio
-    async def test_create_file_rejects_absolute_path_outside_workspace(
+    async def test_create_file_dotdot_resolves_outside_workspace(
         self, workspace_dir: Path
     ) -> None:
-        with pytest.raises(PathTraversalError):
-            await create_file(workspace_dir, "/etc/passwd", "evil")
-
-    @pytest.mark.asyncio
-    async def test_create_file_rejects_symlink_escape(
-        self, workspace_dir: Path
-    ) -> None:
-        # Create a symlink inside workspace pointing outside
-        link = workspace_dir / "escape_link"
-        link.symlink_to("/tmp")
-        with pytest.raises(PathTraversalError):
-            await create_file(workspace_dir, "escape_link/evil.txt", "evil")
+        result = await create_file(workspace_dir, "../sibling.txt", "outside")
+        assert result.success is True
+        assert (workspace_dir.parent / "sibling.txt").read_text(encoding="utf-8") == "outside"
 
     @pytest.mark.asyncio
     async def test_create_file_utf8_content(self, workspace_dir: Path) -> None:
@@ -127,13 +119,12 @@ class TestStrReplace:
         assert "print('goodbye')" in result.content_snippet
 
     @pytest.mark.asyncio
-    async def test_str_replace_rejects_path_traversal(
-        self, workspace_dir: Path
-    ) -> None:
-        with pytest.raises(PathTraversalError):
-            await str_replace(
-                workspace_dir, "../../etc/hosts", "old", "new"
-            )
+    async def test_str_replace_with_absolute_path(self, tmp_path: Path) -> None:
+        target = tmp_path / "outside.txt"
+        target.write_text("old content", encoding="utf-8")
+        result = await str_replace(tmp_path / "workspace", str(target), "old", "new")
+        assert result.success is True
+        assert "new content" in target.read_text(encoding="utf-8")
 
     @pytest.mark.asyncio
     async def test_str_replace_preserves_file_permissions(
@@ -196,9 +187,12 @@ class TestView:
         assert stripped == ""
 
     @pytest.mark.asyncio
-    async def test_view_rejects_path_traversal(self, workspace_dir: Path) -> None:
-        with pytest.raises(PathTraversalError):
-            await view(workspace_dir, "../../etc/passwd")
+    async def test_view_with_absolute_path(self, tmp_path: Path) -> None:
+        target = tmp_path / "outside.txt"
+        target.write_text("viewable content", encoding="utf-8")
+        result = await view(tmp_path / "workspace", str(target))
+        assert result.success is True
+        assert "viewable content" in result.content_snippet
 
     @pytest.mark.asyncio
     async def test_view_rejects_binary_file(self, workspace_dir: Path) -> None:
@@ -239,37 +233,22 @@ class TestView:
 # ---------------------------------------------------------------------------
 
 
-class TestPathJail:
+class TestResolvePath:
     @pytest.mark.asyncio
-    async def test_jail_check_allows_nested_paths(self, workspace_dir: Path) -> None:
+    async def test_nested_relative_paths_resolve_in_workspace(
+        self, workspace_dir: Path
+    ) -> None:
         result = await create_file(workspace_dir, "a/b/c.txt", "nested")
         assert result.success is True
 
-    @pytest.mark.asyncio
-    async def test_jail_check_blocks_dotdot(self, workspace_dir: Path) -> None:
-        with pytest.raises(PathTraversalError):
-            await view(workspace_dir, "../agent.json")
+    def test_resolve_path_relative(self, workspace_dir: Path) -> None:
+        resolved = resolve_path(workspace_dir, "foo/bar.txt")
+        assert resolved == (workspace_dir / "foo" / "bar.txt").resolve()
 
-    @pytest.mark.asyncio
-    async def test_jail_check_blocks_absolute_outside(
-        self, workspace_dir: Path
-    ) -> None:
-        with pytest.raises(PathTraversalError):
-            await view(workspace_dir, "/etc/passwd")
+    def test_resolve_path_absolute(self, workspace_dir: Path) -> None:
+        resolved = resolve_path(workspace_dir, "/tmp/some/file.txt")
+        assert resolved == Path("/tmp/some/file.txt").resolve()
 
-    @pytest.mark.asyncio
-    async def test_jail_check_resolves_symlinks_before_checking(
-        self, workspace_dir: Path
-    ) -> None:
-        link = workspace_dir / "sneaky"
-        link.symlink_to(workspace_dir.parent)
-        with pytest.raises(PathTraversalError):
-            await view(workspace_dir, "sneaky/agent.json")
-
-    @pytest.mark.asyncio
-    async def test_jail_check_blocks_double_encoded_traversal(
-        self, workspace_dir: Path
-    ) -> None:
-        # Attempting a path with encoded dots — should still be blocked by resolve()
-        with pytest.raises(PathTraversalError):
-            await create_file(workspace_dir, "../../../tmp/evil.txt", "bad")
+    def test_resolve_path_dotdot_relative(self, workspace_dir: Path) -> None:
+        resolved = resolve_path(workspace_dir, "../sibling.txt")
+        assert resolved == (workspace_dir.parent / "sibling.txt").resolve()

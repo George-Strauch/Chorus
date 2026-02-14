@@ -64,7 +64,7 @@ def create_default_registry() -> ToolRegistry:
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "Relative path within the workspace",
+                        "description": "File path — relative paths resolve within workspace, absolute paths (starting with /) used as-is",
                     },
                     "content": {
                         "type": "string",
@@ -89,7 +89,7 @@ def create_default_registry() -> ToolRegistry:
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "Relative path within the workspace",
+                        "description": "File path — relative paths resolve within workspace, absolute paths (starting with /) used as-is",
                     },
                     "old_str": {
                         "type": "string",
@@ -118,7 +118,7 @@ def create_default_registry() -> ToolRegistry:
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "Relative path within the workspace",
+                        "description": "File path — relative paths resolve within workspace, absolute paths (starting with /) used as-is",
                     },
                     "offset": {
                         "type": "integer",
