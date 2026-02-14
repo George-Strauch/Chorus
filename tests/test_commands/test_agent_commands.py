@@ -40,6 +40,7 @@ class TestAgentInit:
 
         interaction = MagicMock()
         interaction.response = AsyncMock()
+        interaction.followup = AsyncMock()
         interaction.guild_id = 123
         interaction.guild = MagicMock()
         interaction.guild.categories = [mock_category]
@@ -54,8 +55,9 @@ class TestAgentInit:
             "test-bot", category=mock_category
         )
         mock_bot.agent_manager.create.assert_called_once()
-        interaction.response.send_message.assert_called_once()
-        msg = interaction.response.send_message.call_args[0][0]
+        interaction.response.defer.assert_called_once()
+        interaction.followup.send.assert_called_once()
+        msg = interaction.followup.send.call_args[0][0]
         assert "test-bot" in msg
 
     async def test_agent_init_validates_name(self, mock_bot: MagicMock) -> None:
@@ -69,6 +71,7 @@ class TestAgentInit:
         mock_channel.delete = AsyncMock()
         interaction = MagicMock()
         interaction.response = AsyncMock()
+        interaction.followup = AsyncMock()
         interaction.guild_id = 123
         interaction.guild = MagicMock()
         interaction.guild.categories = []
@@ -81,9 +84,9 @@ class TestAgentInit:
             cog, interaction, name="BAD!", system_prompt=None, model=None, permissions=None
         )
 
-        # Should send ephemeral error
-        interaction.response.send_message.assert_called_once()
-        call_kwargs = interaction.response.send_message.call_args
+        # Should send ephemeral error via followup
+        interaction.followup.send.assert_called_once()
+        call_kwargs = interaction.followup.send.call_args
         assert call_kwargs.kwargs.get("ephemeral") is True
 
 

@@ -79,6 +79,9 @@ class AgentCog(commands.Cog):
         model: str | None = None,
         permissions: str | None = None,
     ) -> None:
+        # Defer — agent creation includes an LLM call for prompt refinement
+        await interaction.response.defer()
+
         # Find or create the "Chorus Agents" category
         category = discord.utils.get(interaction.guild.categories, name="Chorus Agents")  # type: ignore[union-attr]
         if not category:
@@ -101,13 +104,13 @@ class AgentCog(commands.Cog):
                 channel_id=channel.id,
                 overrides=overrides or None,
             )
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 f"Agent **{agent.name}** created in {channel.mention}"
             )
         except (InvalidAgentNameError, AgentExistsError) as exc:
             # Clean up the channel we just created
             await channel.delete()
-            await interaction.response.send_message(str(exc), ephemeral=True)
+            await interaction.followup.send(str(exc), ephemeral=True)
 
     @agent_group.command(name="destroy", description="Destroy an agent")
     @app_commands.describe(name="Agent name to destroy")
