@@ -49,34 +49,60 @@ MODEL_CONTEXT_LIMITS: dict[str, int] = {
 # Default for unknown models
 _DEFAULT_CONTEXT_LIMIT = 128_000
 
+# Hard ceiling — Anthropic charges premium rates above 200K input tokens
+MAX_INPUT_TOKENS = 200_000
+
 # Budget is 80% of max context
 _CONTEXT_BUDGET_RATIO = 0.80
 
 
 def _get_context_limit(model: str | None) -> int:
-    """Return the token context limit for a model."""
+    """Return the token context limit for a model, capped at MAX_INPUT_TOKENS."""
     if model is None:
-        return _DEFAULT_CONTEXT_LIMIT
+        return min(_DEFAULT_CONTEXT_LIMIT, MAX_INPUT_TOKENS)
     # Exact match first
     if model in MODEL_CONTEXT_LIMITS:
-        return MODEL_CONTEXT_LIMITS[model]
+        return min(MODEL_CONTEXT_LIMITS[model], MAX_INPUT_TOKENS)
     # Prefix match for dated model variants
     for prefix, limit in MODEL_CONTEXT_LIMITS.items():
         if model.startswith(prefix):
-            return limit
-    return _DEFAULT_CONTEXT_LIMIT
+            return min(limit, MAX_INPUT_TOKENS)
+    return min(_DEFAULT_CONTEXT_LIMIT, MAX_INPUT_TOKENS)
 
 
-def _estimate_tokens(text: str) -> int:
+def estimate_tokens(text: str) -> int:
     """Rough token estimate: chars / 4."""
     return len(text) // 4
 
 
-def _estimate_message_tokens(msg: dict[str, Any]) -> int:
-    """Estimate tokens for a single message dict."""
+def estimate_message_tokens(msg: dict[str, Any]) -> int:
+    """Estimate tokens for a single message dict.
+
+    Handles standard messages, messages with tool_calls lists,
+    and messages with _anthropic_content raw blocks.
+    """
+    tokens = 4  # overhead for role and structure
+
     content = msg.get("content") or ""
-    # Add overhead for role and structure
-    return _estimate_tokens(content) + 4
+    tokens += estimate_tokens(content)
+
+    # Tool calls: estimate the arguments JSON
+    tool_calls = msg.get("tool_calls")
+    if tool_calls:
+        for tc in tool_calls:
+            tokens += estimate_tokens(tc.get("name", ""))
+            args = tc.get("arguments")
+            if isinstance(args, dict):
+                tokens += estimate_tokens(json.dumps(args))
+            elif isinstance(args, str):
+                tokens += estimate_tokens(args)
+
+    # Anthropic raw content blocks
+    raw_content = msg.get("_anthropic_content")
+    if raw_content and isinstance(raw_content, list):
+        tokens += estimate_tokens(json.dumps(raw_content))
+
+    return tokens
 
 
 def _truncate_to_budget(
@@ -99,7 +125,7 @@ def _truncate_to_budget(
             conv_msgs.append(msg)
 
     # Calculate system message overhead
-    system_tokens = sum(_estimate_message_tokens(m) for m in system_msgs)
+    system_tokens = sum(estimate_message_tokens(m) for m in system_msgs)
     remaining_budget = budget_tokens - system_tokens
 
     if remaining_budget <= 0:
@@ -110,7 +136,7 @@ def _truncate_to_budget(
     kept: list[dict[str, Any]] = []
     total = 0
     for msg in reversed(conv_msgs):
-        msg_tokens = _estimate_message_tokens(msg)
+        msg_tokens = estimate_message_tokens(msg)
         if total + msg_tokens > remaining_budget:
             break
         kept.append(msg)

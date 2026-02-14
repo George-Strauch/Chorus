@@ -15,6 +15,7 @@ from chorus.llm.tool_loop import (
     ToolLoopEvent,
     ToolLoopEventType,
     ToolLoopResult,
+    _truncate_tool_loop_messages,
     run_tool_loop,
 )
 from chorus.permissions.engine import PermissionProfile
@@ -1296,3 +1297,168 @@ class TestWebSearchIntegration:
             model="test",
         )
         assert result.content == "Done."
+
+
+# ---------------------------------------------------------------------------
+# Mid-loop message truncation
+# ---------------------------------------------------------------------------
+
+
+class TestTruncateToolLoopMessages:
+    def test_empty_messages(self) -> None:
+        assert _truncate_tool_loop_messages([], 1000) == []
+
+    def test_preserves_system_messages(self) -> None:
+        msgs = [
+            {"role": "system", "content": "You are helpful."},
+            {"role": "user", "content": "Hello"},
+            {"role": "assistant", "content": "Hi!"},
+        ]
+        result = _truncate_tool_loop_messages(msgs, 100_000)
+        assert result[0]["role"] == "system"
+        assert len(result) == 3
+
+    def test_keeps_recent_messages_when_budget_tight(self) -> None:
+        msgs = [
+            {"role": "system", "content": "Sys."},
+            {"role": "user", "content": "Old " * 1000},
+            {"role": "assistant", "content": "Old reply " * 1000},
+            {"role": "user", "content": "Recent"},
+            {"role": "assistant", "content": "Recent reply"},
+        ]
+        result = _truncate_tool_loop_messages(msgs, 50)
+        assert result[0]["role"] == "system"
+        assert result[-1]["content"] == "Recent reply"
+        # Old messages should have been dropped
+        assert not any("Old " * 100 in m.get("content", "") for m in result)
+
+    def test_atomic_tool_call_block(self) -> None:
+        """Assistant+tool messages stay together as an atomic block."""
+        msgs = [
+            {"role": "system", "content": "Sys"},
+            {"role": "user", "content": "Do it"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{"id": "tc_1", "name": "bash", "arguments": {"command": "ls"}}],
+            },
+            {"role": "tool", "tool_call_id": "tc_1", "content": "file1.py\nfile2.py"},
+            {"role": "assistant", "content": "Done!"},
+        ]
+        result = _truncate_tool_loop_messages(msgs, 100_000)
+        # All messages should be preserved
+        assert len(result) == 5
+
+    def test_atomic_block_not_split(self) -> None:
+        """When budget is tight, an assistant+tool block is either kept or dropped as a unit."""
+        # Create a large tool result that forms an atomic block
+        big_result = "x" * 4000  # ~1000 tokens
+        msgs = [
+            {"role": "system", "content": "Sys"},
+            {"role": "user", "content": "Start"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{"id": "tc_1", "name": "view", "arguments": {"path": "big.py"}}],
+            },
+            {"role": "tool", "tool_call_id": "tc_1", "content": big_result},
+            {"role": "user", "content": "Recent msg"},
+            {"role": "assistant", "content": "Final answer"},
+        ]
+        # Budget: enough for system + recent user + assistant but not the big tool block
+        result = _truncate_tool_loop_messages(msgs, 30)
+        # The big tool block should be dropped as a unit
+        tool_msgs = [m for m in result if m.get("role") == "tool"]
+        assert len(tool_msgs) == 0
+        # But recent messages should be kept
+        assert result[-1]["content"] == "Final answer"
+
+    def test_multiple_tool_blocks_oldest_dropped(self) -> None:
+        """With multiple tool blocks, oldest are dropped first."""
+        msgs = [
+            {"role": "system", "content": "S"},
+            # Block 1 (old)
+            {"role": "user", "content": "Task 1"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{"id": "tc_1", "name": "t", "arguments": {"a": "b"}}],
+            },
+            {"role": "tool", "tool_call_id": "tc_1", "content": "Result 1 " * 100},
+            # Block 2 (recent)
+            {"role": "user", "content": "Task 2"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{"id": "tc_2", "name": "t", "arguments": {"a": "c"}}],
+            },
+            {"role": "tool", "tool_call_id": "tc_2", "content": "Result 2"},
+            {"role": "assistant", "content": "Done"},
+        ]
+        # Budget enough for system + block 2 + final but not block 1
+        result = _truncate_tool_loop_messages(msgs, 80)
+        # Block 2 should be kept
+        tool_msgs = [m for m in result if m.get("role") == "tool"]
+        assert any("Result 2" in m["content"] for m in tool_msgs)
+        # Block 1 (the old big one) should be dropped
+        assert not any("Result 1" in m.get("content", "") for m in result)
+
+    def test_system_only_when_budget_tiny(self) -> None:
+        msgs = [
+            {"role": "system", "content": "Prompt."},
+            {"role": "user", "content": "A very long message " * 500},
+        ]
+        result = _truncate_tool_loop_messages(msgs, 5)
+        assert result[0]["role"] == "system"
+
+    def test_tool_calls_with_anthropic_content(self) -> None:
+        """Messages with _anthropic_content are estimated properly."""
+        msgs = [
+            {"role": "system", "content": "Sys"},
+            {"role": "user", "content": "Hi"},
+            {
+                "role": "assistant",
+                "content": "Let me search...",
+                "tool_calls": [{"id": "tc_1", "name": "bash", "arguments": {"command": "ls"}}],
+                "_anthropic_content": [
+                    {"type": "text", "text": "Let me search..."},
+                    {"type": "tool_use", "id": "tc_1", "name": "bash"},
+                ],
+            },
+            {"role": "tool", "tool_call_id": "tc_1", "content": "result"},
+            {"role": "assistant", "content": "Done"},
+        ]
+        # Should not crash and should handle the messages
+        result = _truncate_tool_loop_messages(msgs, 100_000)
+        assert len(result) == 5
+
+
+class TestToolLoopMidLoopTruncation:
+    @pytest.mark.asyncio
+    async def test_large_tool_results_dont_blow_up_context(self, tmp_path: Path) -> None:
+        """Tool results that push past MAX_INPUT_TOKENS get truncated on next iteration."""
+        # Return a massive result from the first tool call
+        big_result = "x" * 800_000  # ~200K tokens, will exceed budget
+        handler = AsyncMock(return_value=big_result)
+        registry = _make_registry(("my_tool", handler))
+
+        provider = FakeProvider(
+            [
+                _tool_response([ToolCall(id="tc_1", name="my_tool", arguments={"arg": "x"})]),
+                _text_response("Done despite big result."),
+            ]
+        )
+
+        ctx = _make_ctx(tmp_path)
+        result = await run_tool_loop(
+            provider=provider,
+            messages=[{"role": "user", "content": "Do it"}],
+            tools=registry,
+            ctx=ctx,
+            system_prompt="System",
+            model="claude-sonnet-4-20250514",
+        )
+
+        # Loop should complete successfully (truncation prevented oversize context)
+        assert result.content == "Done despite big result."
+        assert result.iterations == 2

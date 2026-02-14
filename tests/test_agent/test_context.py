@@ -14,13 +14,12 @@ if TYPE_CHECKING:
     from chorus.storage.db import Database
 
 from chorus.agent.context import (
+    MAX_INPUT_TOKENS,
     ContextManager,
-    MODEL_CONTEXT_LIMITS,
-    _CONTEXT_BUDGET_RATIO,
-    _estimate_tokens,
     _get_context_limit,
     _truncate_to_budget,
     build_llm_context,
+    estimate_tokens,
 )
 from chorus.agent.threads import ThreadManager
 from chorus.models import Agent, SessionNotFoundError
@@ -503,19 +502,19 @@ class TestEstimateTokens:
     def test_basic_estimate(self) -> None:
         # 100 chars / 4 = 25 tokens
         text = "a" * 100
-        assert _estimate_tokens(text) == 25
+        assert estimate_tokens(text) == 25
 
     def test_empty_string(self) -> None:
-        assert _estimate_tokens("") == 0
+        assert estimate_tokens("") == 0
 
     def test_short_string(self) -> None:
         # "hi" = 2 chars / 4 = 0 (integer division)
-        assert _estimate_tokens("hi") == 0
+        assert estimate_tokens("hi") == 0
 
     def test_reasonable_estimate(self) -> None:
         # A typical paragraph should give a reasonable estimate
         text = "The quick brown fox jumps over the lazy dog. " * 10
-        tokens = _estimate_tokens(text)
+        tokens = estimate_tokens(text)
         assert tokens > 0
         assert tokens < len(text)  # Should be less than char count
 
@@ -701,3 +700,21 @@ class TestBuildLlmContextPreviousBranchSummary:
             if m["role"] == "system" and "Previous conversation" in m.get("content", "")
         ]
         assert len(summary_msgs) == 0
+
+
+class TestMaxInputTokensCap:
+    def test_max_input_tokens_value(self) -> None:
+        assert MAX_INPUT_TOKENS == 200_000
+
+    def test_get_context_limit_capped_at_max(self) -> None:
+        """Even if a model has a higher limit, _get_context_limit caps it."""
+        # All known models are <= 200K so they should be unchanged
+        assert _get_context_limit("claude-opus-4-20250514") == 200_000
+        assert _get_context_limit("gpt-4o") == 128_000
+
+    def test_get_context_limit_caps_unknown_model(self) -> None:
+        """Unknown models get the default, which is already below MAX."""
+        assert _get_context_limit("future-model-1m") <= MAX_INPUT_TOKENS
+
+    def test_get_context_limit_none_capped(self) -> None:
+        assert _get_context_limit(None) <= MAX_INPUT_TOKENS

@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
+from chorus.agent.context import MAX_INPUT_TOKENS, estimate_message_tokens
 from chorus.llm.providers import (
     LLMProvider,
     ToolCall,
@@ -101,6 +102,77 @@ def _build_action_string(tool_name: str, arguments: dict[str, Any]) -> str:
         detail = str(arguments)
 
     return format_action(category, detail)
+
+
+# ---------------------------------------------------------------------------
+# Mid-loop message truncation
+# ---------------------------------------------------------------------------
+
+
+def _truncate_tool_loop_messages(
+    messages: list[dict[str, Any]], budget: int
+) -> list[dict[str, Any]]:
+    """Truncate tool-loop messages to fit within a token budget.
+
+    Groups assistant+tool_result messages into atomic blocks so that a
+    tool_call is never separated from its results (which would cause an
+    API error).  Keeps the most recent blocks within budget.
+    """
+    if not messages:
+        return messages
+
+    # 1. Separate system messages from conversation messages
+    system_msgs: list[dict[str, Any]] = []
+    conv_msgs: list[dict[str, Any]] = []
+    for msg in messages:
+        if msg.get("role") == "system":
+            system_msgs.append(msg)
+        else:
+            conv_msgs.append(msg)
+
+    # 2. Group into atomic blocks
+    #    An assistant msg with tool_calls + all following role:"tool" msgs = one block
+    blocks: list[list[dict[str, Any]]] = []
+    i = 0
+    while i < len(conv_msgs):
+        msg = conv_msgs[i]
+        if msg.get("role") == "assistant" and msg.get("tool_calls"):
+            # Start an atomic block: assistant + following tool results
+            block = [msg]
+            i += 1
+            while i < len(conv_msgs) and conv_msgs[i].get("role") == "tool":
+                block.append(conv_msgs[i])
+                i += 1
+            blocks.append(block)
+        else:
+            blocks.append([msg])
+            i += 1
+
+    # 3. Calculate system token overhead
+    system_tokens = sum(estimate_message_tokens(m) for m in system_msgs)
+    remaining_budget = budget - system_tokens
+
+    if remaining_budget <= 0:
+        # System messages alone exceed budget — return system + last block
+        return system_msgs + (blocks[-1] if blocks else [])
+
+    # 4. Walk backwards through blocks, accumulating tokens until budget hit
+    kept: list[list[dict[str, Any]]] = []
+    total = 0
+    for block in reversed(blocks):
+        block_tokens = sum(estimate_message_tokens(m) for m in block)
+        if total + block_tokens > remaining_budget:
+            break
+        kept.append(block)
+        total += block_tokens
+
+    kept.reverse()
+
+    # 5. Reassemble
+    result = list(system_msgs)
+    for block in kept:
+        result.extend(block)
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -324,6 +396,11 @@ async def run_tool_loop(
                 tools_used=list(tools_used),
                 total_usage=total_usage,
             ),
+        )
+
+        # Truncate to stay within the hard token cap
+        working_messages = _truncate_tool_loop_messages(
+            working_messages, MAX_INPUT_TOKENS
         )
 
         response = await provider.chat(
