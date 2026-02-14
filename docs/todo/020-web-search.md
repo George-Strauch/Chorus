@@ -1,40 +1,61 @@
-# TODO 020 — Web Search Tool (Backlog)
+# TODO 020 — Fix Web Search Server-Side Tool Handling
 
 > **Status:** PENDING
+> **Priority:** High — feature is broken in production
+> **Dependencies:** 008 (LLM integration)
 
-## Objective
+## Background
 
-Give agents the ability to search the web and retrieve content. Adds a `web_search` tool to the tool registry with dedicated permission integration (`tool:web_search:<query>`).
+Web search was implemented in commit `a2b9ccf` using Anthropic's **server-side tool** (`web_search_20250305`) instead of a third-party API (Tavily) as originally planned. The implementation successfully:
 
-## Approach Options
+- Added `web_search` boolean to the Agent model
+- Created `self_edit_web_search` tool for agents to toggle the feature
+- Injected the server-side tool spec into the tools list when enabled
+- Added `_raw_content` preservation in providers.py for round-tripping
 
-Decide on a search API backend before implementation:
+**However, it is broken.** When Anthropic processes a web search and returns results, the tool loop tries to look up `web_search` in the local tool registry, fails, and returns `{"error": "Unknown tool: web_search"}`.
 
-1. **Tavily** — Purpose-built for AI agents, returns clean text extracts (not just links). Free tier (1000 searches/mo). `pip install tavily-python`. Most popular in agent frameworks.
-2. **Brave Search API** — Good free tier, structured JSON results. Requires parsing snippets.
-3. **DuckDuckGo** — No API key needed (`duckduckgo-search` package). Rate-limited, less reliable.
-4. **Bash/curl** — Agents already have bash. No new code, but no dedicated permissions and messy output.
+## The Bug
 
-Recommendation: Tavily for clean agent-friendly output with minimal parsing.
+The tool loop in `tool_loop.py` treats all tool calls the same way:
+
+```python
+tool = tools.get(tc.name)  # Looks for "web_search" in registry
+if tool is None:
+    return json.dumps({"error": f"Unknown tool: {tc.name}"})
+```
+
+But `web_search` is a **server-side tool** — Anthropic's API executes it and returns the results inline. There's no local handler to call. The tool loop doesn't distinguish between "tool calls I need to execute locally" and "tool calls the API already executed server-side."
+
+## Fix
+
+Special-case server-side tool results in `_execute_tool` (or its caller in the tool loop). When the tool name matches a known server-side tool (`web_search`), skip local execution and pass through the raw result from the API response.
+
+### Approach
+
+1. In the tool loop, after receiving an LLM response, check if any tool calls correspond to server-side tools
+2. For server-side tools, extract the result from `response._raw_content` (already preserved) instead of calling the local registry
+3. The tool result message should contain the server-side result as-is
+
+### Key Files
+
+| File | Action |
+|------|--------|
+| `src/chorus/llm/tool_loop.py` | Modify — skip local execution for server-side tools |
+| `src/chorus/llm/providers.py` | Review — ensure `_raw_content` captures `web_search_tool_result` blocks |
+| `tests/test_llm/test_tool_loop.py` | Add — test that simulates Anthropic returning a `web_search` tool call + result |
 
 ## Acceptance Criteria
 
-- New `tools/web_search.py` with a `web_search(query, ...)` tool function.
-- Tool registered in `registry.py`, permission category `web_search`.
-- API key loaded from env var (e.g. `TAVILY_API_KEY`), added to `.env.example`.
-- Results returned as structured text the LLM can reason over (not raw HTML).
-- Optional `max_results` parameter (default 5).
-- Permission action string: `tool:web_search:<query>`.
-- Standard preset updated to include `web_search` in allow or ask as appropriate.
-- Tests with mocked API client (no real API calls in tests).
+- [ ] When `web_search` is enabled and Anthropic returns search results, they are passed through to the conversation correctly
+- [ ] The tool loop does not try to execute server-side tools locally
+- [ ] Permission checks still apply (the existing pre-check before injection is sufficient)
+- [ ] Existing tests continue to pass
+- [ ] New test: mock Anthropic returning `server_tool_use` + `web_search_tool_result` content blocks, verify they round-trip through the tool loop
+- [ ] New test: verify unknown server-side tools are handled gracefully
 
-## Dependencies
+## Notes
 
-- TODO 004 (tool registry pattern)
-- TODO 003 (permission engine)
-
-## Implementation Notes
-
-- Follow the same pattern as `tools/bash.py` and `tools/file_ops.py`: function with keyword-only injected args, registered in `create_default_registry()`.
-- Add `SEARCH_API_KEY` (or provider-specific key) to `BotConfig.from_env()`.
-- Consider adding a `web_fetch(url)` companion tool that retrieves and extracts text from a specific URL.
+- The `_raw_content` field on `LLMResponse` already captures server-side tool blocks — this was added in the original web search commit
+- Consider future server-side tools (Anthropic may add more) — the fix should be generic enough to handle any server-side tool, not just `web_search`
+- TODO 020 originally planned a third-party API approach (Tavily). That approach remains viable as a future enhancement but is not needed for the fix
