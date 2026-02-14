@@ -1,4 +1,4 @@
-"""Live status feedback — embed builder, throttled editor, presence manager."""
+"""Live status feedback — plain text messages, response formatting, presence manager."""
 
 from __future__ import annotations
 
@@ -17,16 +17,8 @@ if TYPE_CHECKING:
 logger = logging.getLogger("chorus.ui.status")
 
 # ---------------------------------------------------------------------------
-# StatusSnapshot + build_status_embed
+# StatusSnapshot (retained for internal tracking)
 # ---------------------------------------------------------------------------
-
-_STATUS_COLOURS: dict[str, discord.Colour] = {
-    "processing": discord.Colour.blue(),
-    "waiting": discord.Colour.blue(),
-    "completed": discord.Colour.blue(),
-    "error": discord.Colour.red(),
-    "cancelled": discord.Colour.red(),
-}
 
 
 @dataclass
@@ -48,137 +40,51 @@ class StatusSnapshot:
     response_content: str | None = None
 
 
-def build_status_embed(snapshot: StatusSnapshot) -> discord.Embed:
-    """Build a compact Discord embed from a status snapshot.
+# ---------------------------------------------------------------------------
+# Plain-text formatting helpers
+# ---------------------------------------------------------------------------
 
-    Two modes:
-    - **In-progress** (no response_content): title = "agent · branch #N",
-      description = status + metrics.
-    - **Finalized with response** (response_content set): description = response
-      text (truncated ~4000 chars), footer = "branch #N · X steps · tokens · elapsed",
-      title = just agent name.
+
+def format_response_footer(snapshot: StatusSnapshot) -> str:
+    """Build the italic footer line for a completed response.
+
+    Format: *branch #N · X steps · 1,234 in / 567 out · 12.5s*
     """
-    colour = _STATUS_COLOURS.get(snapshot.status, discord.Colour.greyple())
     elapsed_s = snapshot.elapsed_ms / 1000
     tok_in = f"{snapshot.token_usage.input_tokens:,}"
     tok_out = f"{snapshot.token_usage.output_tokens:,}"
 
-    # ── Finalized with response ──────────────────────────────────────
-    if snapshot.response_content is not None:
-        # Truncate response to ~4000 chars (Discord embed description limit is 4096)
-        max_len = 4000
-        content = snapshot.response_content
-        if len(content) > max_len:
-            content = content[:max_len] + "…"
+    parts = [
+        f"branch #{snapshot.thread_id}",
+        f"{snapshot.step_number} steps",
+        f"{tok_in} in / {tok_out} out",
+        f"{elapsed_s:.1f}s",
+    ]
+    return "*" + " \u00b7 ".join(parts) + "*"
 
-        footer_parts = [
-            f"branch #{snapshot.thread_id}",
-            f"{snapshot.step_number} steps",
-            f"{tok_in} in / {tok_out} out",
-            f"{elapsed_s:.1f}s",
-        ]
-        footer_text = " · ".join(footer_parts)
 
-        embed = discord.Embed(
-            title=snapshot.agent_name,
-            description=content,
-            colour=colour,
-        )
-        embed.set_footer(text=footer_text)
-
-        if snapshot.error_message:
-            embed.description = (embed.description or "") + f"\n**Error:** {snapshot.error_message}"
-
-        return embed
-
-    # ── In-progress (no response_content) ────────────────────────────
-    status_label = snapshot.status.capitalize()
-
-    # Line 1: status + step info
-    if snapshot.status in ("completed", "error", "cancelled"):
-        line1 = f"**{status_label}** · {snapshot.step_number} steps"
-    elif snapshot.step_number > 0:
-        line1 = f"**{status_label}** · Step {snapshot.step_number}: {snapshot.current_step}"
-    else:
-        line1 = f"**{status_label}** · {snapshot.current_step}"
-
-    # Line 2: metrics
-    parts = [f"{tok_in} in / {tok_out} out"]
-    if snapshot.llm_iterations:
-        calls = "call" if snapshot.llm_iterations == 1 else "calls"
-        parts.append(f"{snapshot.llm_iterations} {calls}")
-    if snapshot.tool_calls_made:
-        parts.append(f"{snapshot.tool_calls_made} tools")
-    parts.append(f"{elapsed_s:.1f}s")
-    line2 = " · ".join(parts)
-
-    description = f"{line1}\n{line2}"
-
-    if snapshot.error_message:
-        description += f"\n**Error:** {snapshot.error_message}"
-
-    return discord.Embed(
-        title=f"{snapshot.agent_name} · branch #{snapshot.thread_id}",
-        description=description,
-        colour=colour,
-    )
+def _truncate_response(content: str, max_len: int = 1900) -> str:
+    """Truncate response to fit Discord's 2000-char message limit with room for footer."""
+    if len(content) <= max_len:
+        return content
+    return content[:max_len] + "\u2026"
 
 
 # ---------------------------------------------------------------------------
-# GlobalEditRateLimiter
+# LiveStatusView — plain text two-phase pattern
 # ---------------------------------------------------------------------------
 
-
-class GlobalEditRateLimiter:
-    """Global rate limiter for Discord message edits across all LiveStatusViews.
-
-    No asyncio.Lock needed — single-threaded event loop.
-    """
-
-    def __init__(
-        self,
-        min_interval: float = 1.1,
-        _clock: Callable[[], float] | None = None,
-    ) -> None:
-        self._min_interval = min_interval
-        self._clock = _clock or self._default_clock
-        self._last_edit_time: float = float("-inf")
-
-    @staticmethod
-    def _default_clock() -> float:
-        return asyncio.get_event_loop().time()
-
-    def can_edit_now(self) -> bool:
-        """Return True if enough time has passed since the last recorded edit."""
-        now = self._clock()
-        return (now - self._last_edit_time) >= self._min_interval
-
-    def time_until_next_allowed(self) -> float:
-        """Seconds remaining until the next edit is allowed (0.0 if allowed now)."""
-        now = self._clock()
-        remaining = self._min_interval - (now - self._last_edit_time)
-        return max(0.0, remaining)
-
-    def record_edit(self) -> None:
-        """Record that an edit was just performed."""
-        self._last_edit_time = self._clock()
-
-
-# Module-level default instance
-_global_rate_limiter = GlobalEditRateLimiter()
-
-
-# ---------------------------------------------------------------------------
-# LiveStatusView — throttled embed editor
-# ---------------------------------------------------------------------------
+_THINKING_MSG = "Thinking..."
+_RESPONSE_EDIT_THRESHOLD_S = 15.0
 
 
 class LiveStatusView:
-    """Manages a single live-updating status embed for one thread.
+    """Manages a plain-text status message for one thread.
 
-    Sends an initial embed on ``start()``, edits it on ``update()``,
-    and does a final edit on ``finalize()``.  Edits are throttled via
-    a shared ``GlobalEditRateLimiter``.
+    Phase 1: Sends a "Thinking..." message on ``start()``.
+    Phase 2 (``finalize()``):
+      - If <15s elapsed: edits the "Thinking..." message with the response.
+      - If >=15s elapsed: sends a NEW message with the response.
     """
 
     def __init__(
@@ -188,7 +94,7 @@ class LiveStatusView:
         thread_id: int,
         get_active_count: Callable[[], int],
         reference: discord.Message | None = None,
-        _rate_limiter: GlobalEditRateLimiter | None = None,
+        _rate_limiter: Any | None = None,  # kept for API compat, unused
         _clock: Callable[[], float] | None = None,
     ) -> None:
         self._channel = channel
@@ -199,11 +105,8 @@ class LiveStatusView:
         )
         self._get_active_count = get_active_count
         self._reference = reference
-        self._rate_limiter = _rate_limiter or _global_rate_limiter
         self._clock = _clock or self._default_clock
         self._message: discord.Message | None = None
-        self._pending = False
-        self._deferred_task: asyncio.Task[None] | None = None
         self._started_at: float | None = None
 
     @staticmethod
@@ -216,37 +119,22 @@ class LiveStatusView:
         return self._message
 
     async def start(self) -> None:
-        """Send the initial status embed."""
+        """Send the initial 'Thinking...' plain text message."""
         self._started_at = self._clock()
-        self._snapshot.active_thread_count = self._get_active_count()
-        embed = build_status_embed(self._snapshot)
         try:
-            kwargs: dict[str, Any] = {"embed": embed}
+            kwargs: dict[str, Any] = {"content": _THINKING_MSG}
             if self._reference is not None:
                 kwargs["reference"] = self._reference
             self._message = await self._channel.send(**kwargs)
-            self._rate_limiter.record_edit()
         except Exception:
-            logger.warning("Failed to send status embed", exc_info=True)
+            logger.warning("Failed to send thinking message", exc_info=True)
 
     async def update(self, **changes: Any) -> None:
-        """Merge changes into the snapshot and schedule a throttled edit."""
-        if self._message is None:
-            return
-
+        """Accept status updates silently — no message edits during processing."""
         for key, value in changes.items():
             if hasattr(self._snapshot, key):
                 setattr(self._snapshot, key, value)
         self._snapshot.active_thread_count = self._get_active_count()
-
-        if self._rate_limiter.can_edit_now():
-            await self._do_edit()
-        else:
-            # Schedule a deferred edit if not already pending
-            if not self._pending:
-                self._pending = True
-                delay = self._rate_limiter.time_until_next_allowed()
-                self._deferred_task = asyncio.create_task(self._deferred_edit(delay))
 
     async def finalize(
         self,
@@ -254,12 +142,11 @@ class LiveStatusView:
         error: str | None = None,
         response_content: str | None = None,
     ) -> None:
-        """Final edit — bypasses rate limiter, always edits immediately."""
-        if self._deferred_task is not None and not self._deferred_task.done():
-            self._deferred_task.cancel()
-            self._deferred_task = None
-        self._pending = False
+        """Deliver the final response.
 
+        - <15s: edit the "Thinking..." message in-place.
+        - >=15s: send a new message, leave "Thinking..." as-is.
+        """
         self._snapshot.status = status
         if error:
             self._snapshot.error_message = error
@@ -267,31 +154,53 @@ class LiveStatusView:
             self._snapshot.response_content = response_content
         self._snapshot.active_thread_count = self._get_active_count()
 
-        if self._message is not None:
-            await self._do_edit()
-            self._rate_limiter.record_edit()
-
-    async def _do_edit(self) -> None:
-        """Perform the actual message edit."""
-        assert self._message is not None
-        # Auto-compute elapsed_ms from creation time
+        # Compute elapsed
         if self._started_at is not None:
             elapsed = self._clock() - self._started_at
             self._snapshot.elapsed_ms = int(elapsed * 1000)
-        embed = build_status_embed(self._snapshot)
-        try:
-            await self._message.edit(embed=embed)
-            self._rate_limiter.record_edit()
-        except Exception:
-            logger.warning("Failed to edit status embed", exc_info=True)
 
-    async def _deferred_edit(self, delay: float) -> None:
-        """Wait then edit, absorbing any updates that arrived meanwhile."""
-        await asyncio.sleep(delay)
-        self._pending = False
-        # Re-check rate limiter — another view may have consumed the slot
-        if self._message is not None and self._rate_limiter.can_edit_now():
-            await self._do_edit()
+        # Build the response text
+        content = self._build_final_text()
+
+        # Decide: edit-in-place or new message
+        elapsed_s = (self._snapshot.elapsed_ms / 1000) if self._snapshot.elapsed_ms else 0
+        if elapsed_s < _RESPONSE_EDIT_THRESHOLD_S and self._message is not None:
+            # Edit in-place
+            try:
+                await self._message.edit(content=content, embed=None)
+            except Exception:
+                logger.warning("Failed to edit response message", exc_info=True)
+        else:
+            # Send new message
+            try:
+                kwargs: dict[str, Any] = {"content": content}
+                if self._reference is not None:
+                    kwargs["reference"] = self._reference
+                new_msg = await self._channel.send(**kwargs)
+                # Update the tracked message to the new one for bot message registration
+                self._message = new_msg
+            except Exception:
+                logger.warning("Failed to send response message", exc_info=True)
+
+    def _build_final_text(self) -> str:
+        """Build the final message text: response + footer."""
+        snap = self._snapshot
+        parts: list[str] = []
+
+        if snap.error_message:
+            parts.append(f"**Error:** {snap.error_message}")
+
+        if snap.response_content:
+            parts.append(_truncate_response(snap.response_content))
+
+        if not parts:
+            parts.append("*(no response)*")
+
+        # Add footer
+        footer = format_response_footer(snap)
+        parts.append(footer)
+
+        return "\n".join(parts)
 
 
 # ---------------------------------------------------------------------------

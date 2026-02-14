@@ -232,6 +232,32 @@ async def edit_permissions(
     )
 
 
+def _resolve_short_model_name(model: str, chorus_home: Path | None) -> str:
+    """Resolve a short model name (e.g. 'opus', 'haiku') to a full model ID.
+
+    Returns the original name if no match is found or no cache is available.
+    """
+    if chorus_home is None:
+        return model
+    from chorus.llm.discovery import get_cached_models
+
+    cached = get_cached_models(chorus_home)
+    if not cached:
+        return model
+
+    # If exact match exists, return as-is
+    if model in cached:
+        return model
+
+    # Try substring match (case-insensitive)
+    needle = model.lower()
+    for m in cached:
+        if needle in m.lower():
+            return m
+
+    return model
+
+
 async def edit_model(
     model: str,
     *,
@@ -242,9 +268,13 @@ async def edit_model(
 ) -> SelfEditResult:
     """Update the agent's model in agent.json.
 
+    Supports short names (e.g. 'opus' → 'claude-opus-4-20250514') via fuzzy matching.
     Validates against the available models cache if *chorus_home* is provided.
     """
-    if chorus_home is not None and not validate_model_available(model, chorus_home):
+    # Resolve short names first
+    resolved = _resolve_short_model_name(model, chorus_home)
+
+    if chorus_home is not None and not validate_model_available(resolved, chorus_home):
         return SelfEditResult(
             success=False,
             edit_type="model",
@@ -254,6 +284,9 @@ async def edit_model(
             "Run /settings validate-keys to refresh the model list.",
             error="unavailable_model",
         )
+
+    # Use the resolved name for the actual update
+    model = resolved
 
     agent_json, data = _read_agent_json(workspace)
     old_model = data.get("model") or ""

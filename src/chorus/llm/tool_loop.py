@@ -57,6 +57,7 @@ _TOOL_TO_CATEGORY: dict[str, str] = {
     "self_edit_docs": "self_edit",
     "self_edit_permissions": "self_edit",
     "self_edit_model": "self_edit",
+    "list_models": "info",
 }
 
 

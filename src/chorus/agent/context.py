@@ -21,6 +21,104 @@ logger = logging.getLogger("chorus.agent.context")
 # Type alias for the summarizer callback
 Summarizer = Callable[[list[dict[str, Any]]], Coroutine[Any, Any, str]]
 
+# ---------------------------------------------------------------------------
+# Token estimation and model context limits
+# ---------------------------------------------------------------------------
+
+MODEL_CONTEXT_LIMITS: dict[str, int] = {
+    # Anthropic models
+    "claude-opus-4-20250514": 200_000,
+    "claude-sonnet-4-20250514": 200_000,
+    "claude-haiku-4-20250506": 200_000,
+    "claude-3-5-sonnet-20241022": 200_000,
+    "claude-3-5-haiku-20241022": 200_000,
+    "claude-3-opus-20240229": 200_000,
+    "claude-3-haiku-20240307": 200_000,
+    # OpenAI models
+    "gpt-4o": 128_000,
+    "gpt-4o-mini": 128_000,
+    "gpt-4-turbo": 128_000,
+    "gpt-4": 8_192,
+    "o1": 200_000,
+    "o1-mini": 128_000,
+    "o3": 200_000,
+    "o3-mini": 200_000,
+    "o4-mini": 200_000,
+}
+
+# Default for unknown models
+_DEFAULT_CONTEXT_LIMIT = 128_000
+
+# Budget is 80% of max context
+_CONTEXT_BUDGET_RATIO = 0.80
+
+
+def _get_context_limit(model: str | None) -> int:
+    """Return the token context limit for a model."""
+    if model is None:
+        return _DEFAULT_CONTEXT_LIMIT
+    # Exact match first
+    if model in MODEL_CONTEXT_LIMITS:
+        return MODEL_CONTEXT_LIMITS[model]
+    # Prefix match for dated model variants
+    for prefix, limit in MODEL_CONTEXT_LIMITS.items():
+        if model.startswith(prefix):
+            return limit
+    return _DEFAULT_CONTEXT_LIMIT
+
+
+def _estimate_tokens(text: str) -> int:
+    """Rough token estimate: chars / 4."""
+    return len(text) // 4
+
+
+def _estimate_message_tokens(msg: dict[str, Any]) -> int:
+    """Estimate tokens for a single message dict."""
+    content = msg.get("content") or ""
+    # Add overhead for role and structure
+    return _estimate_tokens(content) + 4
+
+
+def _truncate_to_budget(
+    messages: list[dict[str, Any]], budget_tokens: int
+) -> list[dict[str, Any]]:
+    """Truncate the oldest messages to fit within a token budget.
+
+    Preserves system messages at the start and keeps the most recent messages.
+    """
+    if not messages:
+        return messages
+
+    # Separate system messages from conversation
+    system_msgs: list[dict[str, Any]] = []
+    conv_msgs: list[dict[str, Any]] = []
+    for msg in messages:
+        if msg.get("role") == "system":
+            system_msgs.append(msg)
+        else:
+            conv_msgs.append(msg)
+
+    # Calculate system message overhead
+    system_tokens = sum(_estimate_message_tokens(m) for m in system_msgs)
+    remaining_budget = budget_tokens - system_tokens
+
+    if remaining_budget <= 0:
+        # System messages alone exceed budget — return system + last message
+        return system_msgs + conv_msgs[-1:] if conv_msgs else system_msgs
+
+    # Walk backwards through conversation messages, accumulating until budget
+    kept: list[dict[str, Any]] = []
+    total = 0
+    for msg in reversed(conv_msgs):
+        msg_tokens = _estimate_message_tokens(msg)
+        if total + msg_tokens > remaining_budget:
+            break
+        kept.append(msg)
+        total += msg_tokens
+
+    kept.reverse()
+    return system_msgs + kept
+
 
 class ContextManager:
     """Manages the rolling context window for a single agent.
@@ -239,6 +337,11 @@ async def build_llm_context(
     context_manager: ContextManager,
     thread_manager: ThreadManager,
     agent_docs_dir: Path | None,
+    *,
+    model: str | None = None,
+    available_models: list[str] | None = None,
+    previous_branch_summary: str | None = None,
+    previous_branch_id: int | None = None,
 ) -> list[dict[str, Any]]:
     """Assemble the full context for an LLM call.
 
@@ -247,8 +350,10 @@ async def build_llm_context(
     Order:
     1. System prompt
     2. Agent docs (appended to system prompt)
-    3. Thread/process status
-    4. Rolling window messages
+    3. Model self-awareness info
+    4. Previous branch summary (if any)
+    5. Thread/process status
+    6. Rolling window messages (scoped to branch, truncated to 80% budget)
     """
     messages: list[dict[str, Any]] = []
 
@@ -259,20 +364,39 @@ async def build_llm_context(
         if docs_content:
             system_parts.append(f"\n\n## Agent Documentation\n\n{docs_content}")
 
+    # 3. Model self-awareness
+    effective_model = model or agent.model or "unknown"
+    system_parts.append(f"\n\nYou are running on model: {effective_model}.")
+    if available_models:
+        model_list = ", ".join(available_models[:20])  # cap to avoid bloat
+        system_parts.append(f"Available models: {model_list}.")
+
     messages.append({"role": "system", "content": "\n".join(system_parts)})
 
-    # 3. Thread status
+    # 4. Previous branch summary
+    if previous_branch_summary and previous_branch_id is not None:
+        messages.append({
+            "role": "system",
+            "content": f"Previous conversation (branch #{previous_branch_id}): {previous_branch_summary}",
+        })
+
+    # 5. Thread status
     current_thread_id = thread_id or 0
     thread_status = build_thread_status(thread_manager, current_thread_id)
     if thread_status and thread_status != "No active threads.":
         messages.append({"role": "system", "content": thread_status})
 
-    # 4. Rolling window messages
+    # 6. Rolling window messages — scoped to this branch
     window_msgs = await context_manager.get_context(thread_id=thread_id)
     for msg in window_msgs:
         messages.append({
             "role": msg["role"],
             "content": msg.get("content", ""),
         })
+
+    # 7. Token budget truncation (80% of model max)
+    context_limit = _get_context_limit(model)
+    budget = int(context_limit * _CONTEXT_BUDGET_RATIO)
+    messages = _truncate_to_budget(messages, budget)
 
     return messages

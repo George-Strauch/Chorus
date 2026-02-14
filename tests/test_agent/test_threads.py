@@ -509,3 +509,140 @@ class TestInjectQueue:
         got = thread.inject_queue.get_nowait()
         assert got == msg
         assert thread.inject_queue.empty()
+
+
+# ── Branch Persistence ─────────────────────────────────────────────────
+
+
+class TestBranchPersistence:
+    async def test_initialize_loads_latest_branch_id(
+        self, thread_manager_with_db: ThreadManager
+    ) -> None:
+        tm = thread_manager_with_db
+        assert tm._db is not None
+        # Manually create branches in DB
+        await tm._db.create_branch("test-agent", 1, "2026-02-13T10:00:00")
+        await tm._db.create_branch("test-agent", 2, "2026-02-13T11:00:00")
+        await tm._db.create_branch("test-agent", 5, "2026-02-13T12:00:00")
+
+        # Reset initialized flag so initialize() runs again
+        tm._initialized = False
+        tm._next_id = 1
+
+        await tm.initialize()
+        # Should resume from 5+1=6
+        assert tm._next_id == 6
+
+    async def test_initialize_no_branches_keeps_default(
+        self, thread_manager_with_db: ThreadManager
+    ) -> None:
+        tm = thread_manager_with_db
+        tm._initialized = False
+        tm._next_id = 1
+        await tm.initialize()
+        # No branches in DB — should keep default of 1
+        assert tm._next_id == 1
+
+    async def test_initialize_idempotent(
+        self, thread_manager_with_db: ThreadManager
+    ) -> None:
+        tm = thread_manager_with_db
+        assert tm._db is not None
+        await tm._db.create_branch("test-agent", 10, "2026-02-13T10:00:00")
+        tm._initialized = False
+        tm._next_id = 1
+        await tm.initialize()
+        assert tm._next_id == 11
+        # Second call should be a no-op
+        await tm.initialize()
+        assert tm._next_id == 11
+
+    async def test_check_idle_timeout_true_when_old(
+        self, thread_manager_with_db: ThreadManager
+    ) -> None:
+        from datetime import timedelta
+
+        tm = thread_manager_with_db
+        assert tm._db is not None
+        # Create a branch with last_message_at > 3 hours ago
+        old_time = (datetime.now(UTC) - timedelta(hours=4)).isoformat()
+        await tm._db.create_branch("test-agent", 1, old_time)
+        await tm._db.update_branch_last_message("test-agent", 1, old_time)
+        result = await tm.check_idle_timeout()
+        assert result is True
+
+    async def test_check_idle_timeout_false_when_recent(
+        self, thread_manager_with_db: ThreadManager
+    ) -> None:
+        from datetime import timedelta
+
+        tm = thread_manager_with_db
+        assert tm._db is not None
+        # Create a branch with last_message_at < 3 hours ago
+        recent_time = (datetime.now(UTC) - timedelta(minutes=30)).isoformat()
+        await tm._db.create_branch("test-agent", 1, recent_time)
+        await tm._db.update_branch_last_message("test-agent", 1, recent_time)
+        result = await tm.check_idle_timeout()
+        assert result is False
+
+    async def test_check_idle_timeout_no_db(self) -> None:
+        tm = ThreadManager("test-agent")
+        result = await tm.check_idle_timeout()
+        assert result is False
+
+    async def test_check_idle_timeout_no_branches(
+        self, thread_manager_with_db: ThreadManager
+    ) -> None:
+        tm = thread_manager_with_db
+        result = await tm.check_idle_timeout()
+        assert result is False
+
+    async def test_create_branch_persists_to_db(
+        self, thread_manager_with_db: ThreadManager
+    ) -> None:
+        tm = thread_manager_with_db
+        assert tm._db is not None
+        thread = await tm.create_branch(
+            {"role": "user", "content": "hello"}, is_main=True
+        )
+        assert thread.id == 1
+        # Verify persisted in DB
+        branch = await tm._db.get_branch("test-agent", 1)
+        assert branch is not None
+        assert branch["agent_name"] == "test-agent"
+        assert branch["status"] == "active"
+
+    async def test_create_branch_increments_next_id(
+        self, thread_manager_with_db: ThreadManager
+    ) -> None:
+        tm = thread_manager_with_db
+        t1 = await tm.create_branch({"role": "user", "content": "a"})
+        t2 = await tm.create_branch({"role": "user", "content": "b"})
+        assert t1.id == 1
+        assert t2.id == 2
+        assert tm._next_id == 3
+
+    async def test_get_or_create_current_branch_creates_when_no_main(
+        self, thread_manager_with_db: ThreadManager
+    ) -> None:
+        tm = thread_manager_with_db
+        assert tm.get_main_thread() is None
+        thread = await tm.get_or_create_current_branch(
+            {"role": "user", "content": "hello"}
+        )
+        assert thread is not None
+        assert thread.id >= 1
+        assert tm.get_main_thread() is thread
+
+    async def test_get_or_create_current_branch_returns_existing(
+        self, thread_manager_with_db: ThreadManager
+    ) -> None:
+        tm = thread_manager_with_db
+        t1 = await tm.get_or_create_current_branch(
+            {"role": "user", "content": "first"}
+        )
+        t2 = await tm.get_or_create_current_branch(
+            {"role": "user", "content": "second"}
+        )
+        # Should return the same thread since it's still active
+        assert t1.id == t2.id

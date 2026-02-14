@@ -7,7 +7,7 @@ import contextlib
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
@@ -15,6 +15,9 @@ if TYPE_CHECKING:
     from chorus.storage.db import Database
 
 logger = logging.getLogger("chorus.agent.threads")
+
+# Idle timeout: 3 hours
+IDLE_TIMEOUT_SECONDS = 3 * 60 * 60
 
 
 class ThreadStatus(Enum):
@@ -123,11 +126,114 @@ class ThreadManager:
         self._thread_file_locks: dict[int, set[str]] = {}  # thread_id -> set of locked paths
         self._next_id: int = 1
         self._main_thread_id: int | None = None
+        self._initialized: bool = False
+
+    async def initialize(self) -> None:
+        """Load the latest branch_id from DB to resume counting after restart."""
+        if self._db is None or self._initialized:
+            return
+        latest = await self._db.get_latest_branch_id(self._agent_name)
+        if latest is not None:
+            self._next_id = latest + 1
+            logger.info(
+                "Resumed branch counting for %s at #%d", self._agent_name, self._next_id
+            )
+        self._initialized = True
+
+    async def check_idle_timeout(self) -> bool:
+        """Check if the current (highest) branch has been idle for >3 hours.
+
+        Returns True if a new branch should be created due to idle timeout.
+        """
+        if self._db is None:
+            return False
+        latest_id = await self._db.get_latest_branch_id(self._agent_name)
+        if latest_id is None:
+            return False
+        branch = await self._db.get_branch(self._agent_name, latest_id)
+        if branch is None:
+            return False
+        last_msg = branch.get("last_message_at")
+        if last_msg is None:
+            return False
+        last_msg_dt = datetime.fromisoformat(last_msg)
+        if last_msg_dt.tzinfo is None:
+            last_msg_dt = last_msg_dt.replace(tzinfo=UTC)
+        return (datetime.now(UTC) - last_msg_dt) > timedelta(seconds=IDLE_TIMEOUT_SECONDS)
+
+    async def get_or_create_current_branch(
+        self, initial_message: dict[str, Any]
+    ) -> ExecutionThread:
+        """Get the current main branch or create a new one.
+
+        Creates a new branch if:
+        - No branches exist (first message ever)
+        - Idle timeout exceeded (>3h since last message)
+        - Main thread is None or completed
+        """
+        await self.initialize()
+
+        # Check if main thread exists and is still usable
+        main_thread = self.get_main_thread()
+        if main_thread is not None and main_thread.status != ThreadStatus.COMPLETED:
+            return main_thread
+
+        # Check idle timeout
+        needs_new = await self.check_idle_timeout()
+
+        if not needs_new and main_thread is not None:
+            # Main thread completed, but not idle — still create new
+            needs_new = True
+
+        if not needs_new:
+            # Check if any branches exist at all
+            if self._db is not None:
+                latest = await self._db.get_latest_branch_id(self._agent_name)
+                if latest is None:
+                    needs_new = True
+                else:
+                    needs_new = True  # main is None/completed → new branch
+            else:
+                needs_new = True
+
+        return await self.create_branch(initial_message, is_main=True)
+
+    async def create_branch(
+        self, initial_message: dict[str, Any], *, is_main: bool = False
+    ) -> ExecutionThread:
+        """Create a new branch backed by a DB row."""
+        await self.initialize()
+        now = datetime.now(UTC)
+
+        branch_id = self._next_id
+        thread = ExecutionThread(
+            id=branch_id,
+            agent_name=self._agent_name,
+            messages=[initial_message],
+            status=ThreadStatus.IDLE,
+            metrics=ThreadMetrics(created_at=now),
+        )
+        self._threads[thread.id] = thread
+        self._next_id += 1
+
+        if is_main:
+            self._main_thread_id = thread.id
+
+        # Persist to DB
+        if self._db is not None:
+            await self._db.create_branch(
+                agent_name=self._agent_name,
+                branch_id=branch_id,
+                created_at=now.isoformat(),
+            )
+
+        logger.info("Created branch #%d for agent %s", thread.id, self._agent_name)
+        return thread
 
     def create_thread(
         self, initial_message: dict[str, Any], *, is_main: bool = False
     ) -> ExecutionThread:
-        """Create a new execution thread with an initial message."""
+        """Create a new execution thread with an initial message (sync, legacy)."""
         thread = ExecutionThread(
             id=self._next_id,
             agent_name=self._agent_name,

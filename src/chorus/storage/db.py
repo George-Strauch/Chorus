@@ -82,6 +82,20 @@ CREATE TABLE IF NOT EXISTS messages (
 
 CREATE INDEX IF NOT EXISTS idx_messages_agent_time
     ON messages(agent_name, timestamp);
+
+CREATE TABLE IF NOT EXISTS branches (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_name TEXT NOT NULL,
+    branch_id INTEGER NOT NULL,
+    summary TEXT,
+    created_at TEXT NOT NULL,
+    last_message_at TEXT,
+    status TEXT NOT NULL DEFAULT 'active',
+    UNIQUE(agent_name, branch_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_branches_agent
+    ON branches(agent_name, branch_id);
 """
 
 
@@ -517,3 +531,105 @@ class Database:
             "window_start": row[7],
             "window_end": row[8],
         }
+
+    # ── Branches ─────────────────────────────────────────────────────────
+
+    async def create_branch(
+        self,
+        agent_name: str,
+        branch_id: int,
+        created_at: str,
+    ) -> None:
+        """Insert a new branch row."""
+        await self.connection.execute(
+            "INSERT INTO branches (agent_name, branch_id, created_at, last_message_at, status) "
+            "VALUES (?, ?, ?, ?, 'active')",
+            (agent_name, branch_id, created_at, created_at),
+        )
+        await self.connection.commit()
+        logger.info("Created branch #%d for agent %s", branch_id, agent_name)
+
+    async def get_latest_branch_id(self, agent_name: str) -> int | None:
+        """Return the highest branch_id for an agent, or None if no branches exist."""
+        async with self.connection.execute(
+            "SELECT MAX(branch_id) FROM branches WHERE agent_name = ?",
+            (agent_name,),
+        ) as cursor:
+            row = await cursor.fetchone()
+        if row is None or row[0] is None:
+            return None
+        return int(row[0])
+
+    async def get_branch(
+        self, agent_name: str, branch_id: int
+    ) -> dict[str, Any] | None:
+        """Fetch a single branch by agent name and branch_id."""
+        async with self.connection.execute(
+            "SELECT agent_name, branch_id, summary, created_at, last_message_at, status "
+            "FROM branches WHERE agent_name = ? AND branch_id = ?",
+            (agent_name, branch_id),
+        ) as cursor:
+            row = await cursor.fetchone()
+        if row is None:
+            return None
+        return {
+            "agent_name": row[0],
+            "branch_id": row[1],
+            "summary": row[2],
+            "created_at": row[3],
+            "last_message_at": row[4],
+            "status": row[5],
+        }
+
+    async def update_branch_last_message(
+        self, agent_name: str, branch_id: int, timestamp: str
+    ) -> None:
+        """Update last_message_at for idle timeout tracking."""
+        await self.connection.execute(
+            "UPDATE branches SET last_message_at = ? "
+            "WHERE agent_name = ? AND branch_id = ?",
+            (timestamp, agent_name, branch_id),
+        )
+        await self.connection.commit()
+
+    async def set_branch_summary(
+        self, agent_name: str, branch_id: int, summary: str
+    ) -> None:
+        """Set the summary for a branch."""
+        await self.connection.execute(
+            "UPDATE branches SET summary = ? WHERE agent_name = ? AND branch_id = ?",
+            (summary, agent_name, branch_id),
+        )
+        await self.connection.commit()
+
+    async def set_branch_status(
+        self, agent_name: str, branch_id: int, status: str
+    ) -> None:
+        """Set the status for a branch (active/completed)."""
+        await self.connection.execute(
+            "UPDATE branches SET status = ? WHERE agent_name = ? AND branch_id = ?",
+            (status, agent_name, branch_id),
+        )
+        await self.connection.commit()
+
+    async def list_branches(
+        self, agent_name: str, limit: int = 50
+    ) -> list[dict[str, Any]]:
+        """List branches for an agent, most recent first."""
+        async with self.connection.execute(
+            "SELECT agent_name, branch_id, summary, created_at, last_message_at, status "
+            "FROM branches WHERE agent_name = ? ORDER BY branch_id DESC LIMIT ?",
+            (agent_name, limit),
+        ) as cursor:
+            rows = await cursor.fetchall()
+        return [
+            {
+                "agent_name": row[0],
+                "branch_id": row[1],
+                "summary": row[2],
+                "created_at": row[3],
+                "last_message_at": row[4],
+                "status": row[5],
+            }
+            for row in rows
+        ]
