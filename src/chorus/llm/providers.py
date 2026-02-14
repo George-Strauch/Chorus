@@ -51,6 +51,7 @@ class LLMResponse:
     stop_reason: str
     usage: Usage
     model: str
+    _raw_content: list[dict[str, Any]] | None = None
 
 
 @dataclass
@@ -136,6 +137,10 @@ def _messages_to_anthropic(messages: list[dict[str, Any]]) -> tuple[str, list[di
 
         if role == "system":
             system_parts.append(msg["content"])
+
+        elif role == "assistant" and msg.get("_anthropic_content"):
+            # Preserve raw Anthropic content blocks (e.g. web search results)
+            translated.append({"role": "assistant", "content": msg["_anthropic_content"]})
 
         elif role == "assistant" and msg.get("tool_calls"):
             # Build content blocks: text + tool_use blocks
@@ -264,16 +269,29 @@ class AnthropicProvider:
         response = await self._client.messages.create(**kwargs)
 
         # Parse response
-        content_text: str | None = None
+        text_parts: list[str] = []
         tool_calls: list[ToolCall] = []
+        has_web_search = False
 
         for block in response.content:
             if block.type == "text":
-                content_text = block.text
+                text_parts.append(block.text)
             elif block.type == "tool_use":
                 tool_calls.append(
                     ToolCall(id=block.id, name=block.name, arguments=block.input)
                 )
+            elif block.type in ("server_tool_use", "web_search_tool_result"):
+                has_web_search = True
+
+        content_text = "\n\n".join(text_parts) if text_parts else None
+
+        # Capture raw content blocks when web search is present
+        raw_content: list[dict[str, Any]] | None = None
+        if has_web_search:
+            raw_content = [
+                block.model_dump() if hasattr(block, "model_dump") else {"type": block.type}
+                for block in response.content
+            ]
 
         return LLMResponse(
             content=content_text,
@@ -284,6 +302,7 @@ class AnthropicProvider:
                 output_tokens=response.usage.output_tokens,
             ),
             model=response.model,
+            _raw_content=raw_content,
         )
 
 

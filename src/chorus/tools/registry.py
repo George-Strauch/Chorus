@@ -376,6 +376,7 @@ def create_default_registry() -> ToolRegistry:
         edit_model,
         edit_permissions,
         edit_system_prompt,
+        edit_web_search,
     )
 
     registry.register(
@@ -467,6 +468,28 @@ def create_default_registry() -> ToolRegistry:
                 "required": ["model"],
             },
             handler=edit_model,
+        )
+    )
+
+    registry.register(
+        ToolDefinition(
+            name="self_edit_web_search",
+            description=(
+                "Enable or disable web search for this agent. "
+                "When enabled, the agent can search the web during conversations "
+                "(Anthropic models only)."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "enabled": {
+                        "type": "boolean",
+                        "description": "Whether to enable web search",
+                    },
+                },
+                "required": ["enabled"],
+            },
+            handler=edit_web_search,
         )
     )
 

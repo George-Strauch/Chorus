@@ -309,3 +309,36 @@ async def edit_model(
         new_value=model,
         message=f"Model updated to '{model}'.",
     )
+
+
+async def edit_web_search(
+    enabled: bool,
+    *,
+    workspace: Path,
+    agent_name: str,
+    db: Database | None = None,
+) -> SelfEditResult:
+    """Toggle the agent's web search capability in agent.json."""
+    agent_json, data = _read_agent_json(workspace)
+    old_value = str(data.get("web_search", False)).lower()
+    data["web_search"] = enabled
+    _atomic_write_json(agent_json, data)
+
+    new_value = str(enabled).lower()
+
+    if db is not None:
+        await db.log_self_edit(
+            agent_name=agent_name,
+            edit_type="web_search",
+            old_value=old_value,
+            new_value=new_value,
+        )
+
+    state = "enabled" if enabled else "disabled"
+    return SelfEditResult(
+        success=True,
+        edit_type="web_search",
+        old_value=old_value,
+        new_value=new_value,
+        message=f"Web search {state}.",
+    )

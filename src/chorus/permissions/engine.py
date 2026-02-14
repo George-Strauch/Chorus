@@ -125,6 +125,7 @@ PRESETS: dict[str, PermissionProfile] = {
             r"tool:bash:.*",
             r"tool:git:(push|merge_request).*",
             r"tool:self_edit:(system_prompt|permissions|model).*",
+            r"tool:web_search:.*",
         ],
     ),
     "locked": PermissionProfile(allow=[r"tool:file:view.*"], ask=[]),

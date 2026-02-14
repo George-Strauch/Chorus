@@ -14,7 +14,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("chorus.agent.manager")
 
-CONFIGURABLE_KEYS = {"system_prompt", "model", "permissions"}
+CONFIGURABLE_KEYS = {"system_prompt", "model", "permissions", "web_search"}
 
 
 class AgentManager:
@@ -118,6 +118,9 @@ class AgentManager:
 
         config_path = agent_path / "agent.json"
         data = read_agent_json(config_path)
-        data[key] = value
+        if key == "web_search":
+            data[key] = value.lower() in ("true", "1", "yes")
+        else:
+            data[key] = value
         write_agent_json(config_path, data)
         logger.info("Configured agent %s: %s = %s", name, key, value)
