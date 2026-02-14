@@ -110,6 +110,23 @@ class AgentCog(commands.Cog):
             await interaction.followup.send(
                 f"Agent **{agent.name}** created in {channel.mention}"
             )
+
+            # Send welcome message to the new channel
+            model_display = agent.model or "server default"
+            welcome = (
+                f"**{agent.name}** is ready.\n\n"
+                f"**Model:** `{model_display}`\n"
+                f"**Permissions:** `{agent.permissions}`\n\n"
+                "Just type a message to start talking. "
+                "This channel is the agent's workspace — "
+                "it can read/write files, run commands, and manage its own config.\n\n"
+                "**Useful commands:**\n"
+                "- `/agent config` — change model, prompt, or permissions\n"
+                "- `/context clear` — reset the conversation window\n"
+                "- `/thread list` — see running execution threads\n"
+                "- `/status` — agent overview\n"
+            )
+            await channel.send(welcome)
         except (InvalidAgentNameError, AgentExistsError) as exc:
             # Clean up the channel we just created
             await channel.delete()
