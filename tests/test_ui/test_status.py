@@ -32,7 +32,7 @@ class TestBuildStatusEmbed:
         defaults.update(overrides)
         return StatusSnapshot(**defaults)
 
-    def test_embed_title_contains_agent_and_thread(self) -> None:
+    def test_embed_title_contains_agent_and_branch(self) -> None:
         snap = self._make_snapshot()
         embed = build_status_embed(snap)
         assert "test-agent" in embed.title
@@ -63,64 +63,61 @@ class TestBuildStatusEmbed:
         embed = build_status_embed(snap)
         assert embed.colour == discord.Colour.red()
 
-    def test_embed_has_status_field(self) -> None:
+    def test_description_contains_status(self) -> None:
         snap = self._make_snapshot(status="processing")
         embed = build_status_embed(snap)
-        field_names = [f.name for f in embed.fields]
-        assert "Status" in field_names
+        assert "Processing" in embed.description
 
-    def test_embed_has_step_field(self) -> None:
+    def test_description_contains_step_info(self) -> None:
         snap = self._make_snapshot(current_step="Running bash", step_number=3)
         embed = build_status_embed(snap)
-        field_names = [f.name for f in embed.fields]
-        assert "Step" in field_names
-        step_field = next(f for f in embed.fields if f.name == "Step")
-        assert "3" in step_field.value
-        assert "bash" in step_field.value
+        assert "3" in embed.description
+        assert "bash" in embed.description
 
-    def test_embed_has_tokens_field_with_formatting(self) -> None:
+    def test_description_contains_tokens(self) -> None:
         snap = self._make_snapshot(
             token_usage=Usage(input_tokens=1247, output_tokens=892),
         )
         embed = build_status_embed(snap)
-        field_names = [f.name for f in embed.fields]
-        assert "Tokens" in field_names
-        tokens_field = next(f for f in embed.fields if f.name == "Tokens")
-        assert "1,247" in tokens_field.value
-        assert "892" in tokens_field.value
+        assert "1,247" in embed.description
+        assert "892" in embed.description
 
-    def test_embed_has_elapsed_field(self) -> None:
+    def test_description_contains_elapsed(self) -> None:
         snap = self._make_snapshot(elapsed_ms=5200)
         embed = build_status_embed(snap)
-        field_names = [f.name for f in embed.fields]
-        assert "Elapsed" in field_names
-        elapsed_field = next(f for f in embed.fields if f.name == "Elapsed")
-        assert "5.2s" in elapsed_field.value
+        assert "5.2s" in embed.description
 
-    def test_embed_has_tools_field(self) -> None:
+    def test_description_contains_tools(self) -> None:
         snap = self._make_snapshot(tool_calls_made=3, tools_used=["bash", "create_file"])
         embed = build_status_embed(snap)
-        field_names = [f.name for f in embed.fields]
-        assert "Tools" in field_names
+        assert "3 tools" in embed.description
 
-    def test_embed_has_llm_calls_field(self) -> None:
+    def test_description_contains_llm_calls(self) -> None:
         snap = self._make_snapshot(llm_iterations=4)
         embed = build_status_embed(snap)
-        field_names = [f.name for f in embed.fields]
-        assert "LLM Calls" in field_names
+        assert "4 calls" in embed.description
 
-    def test_completed_uses_total_language(self) -> None:
+    def test_completed_uses_steps_language(self) -> None:
         snap = self._make_snapshot(status="completed", step_number=5)
         embed = build_status_embed(snap)
-        step_field = next(f for f in embed.fields if f.name == "Step")
-        assert "total" in step_field.value.lower() or "5" in step_field.value
+        assert "5 steps" in embed.description
 
     def test_error_shows_error_message(self) -> None:
         snap = self._make_snapshot(status="error", error_message="API timeout")
         embed = build_status_embed(snap)
-        # Error message should appear somewhere in the embed
-        all_values = " ".join(f.value for f in embed.fields)
-        assert "API timeout" in all_values
+        assert "API timeout" in embed.description
+
+    def test_no_fields_used(self) -> None:
+        """Embed should use description only, no fields."""
+        snap = self._make_snapshot()
+        embed = build_status_embed(snap)
+        assert len(embed.fields) == 0
+
+    def test_single_call_uses_singular(self) -> None:
+        snap = self._make_snapshot(llm_iterations=1)
+        embed = build_status_embed(snap)
+        assert "1 call" in embed.description
+        assert "1 calls" not in embed.description
 
 
 # ---------------------------------------------------------------------------
@@ -285,7 +282,7 @@ class TestLiveStatusView:
 
     @pytest.mark.asyncio
     async def test_batches_rapid_events(self) -> None:
-        """Multiple updates within throttle window → latest values in single edit."""
+        """Multiple updates within throttle window -> latest values in single edit."""
         channel = _make_mock_channel()
         clock = FakeClock()
         view = LiveStatusView(
@@ -297,7 +294,7 @@ class TestLiveStatusView:
             _clock=clock,
         )
         await view.start()
-        clock.advance(2.0)  # Past throttle → first update edits immediately
+        clock.advance(2.0)  # Past throttle -> first update edits immediately
         await view.update(current_step="Step 1", step_number=1)
         await asyncio.sleep(0)
         msg = channel.send.return_value
@@ -377,7 +374,7 @@ class TestBotPresenceManager:
         clock.advance(0.1)
         await mgr.thread_started("agent-a", 2)
         await asyncio.sleep(0)
-        # At most one more call (the deferred one hasn't fired yet because real time hasn't passed)
+        # At most one more call (the deferred one hasn't fired yet)
         assert bot.change_presence.call_count <= initial_count + 1
 
     @pytest.mark.asyncio

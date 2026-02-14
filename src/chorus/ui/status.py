@@ -48,52 +48,41 @@ class StatusSnapshot:
 
 
 def build_status_embed(snapshot: StatusSnapshot) -> discord.Embed:
-    """Build a Discord embed from a status snapshot."""
+    """Build a compact Discord embed from a status snapshot."""
     colour = _STATUS_COLOURS.get(snapshot.status, discord.Colour.greyple())
-    embed = discord.Embed(
-        title=f"Agent: {snapshot.agent_name} | Branch #{snapshot.thread_id}",
-        colour=colour,
-    )
-
-    # Row 1: Status, Step, Threads
-    status_label = snapshot.status.capitalize()
-    embed.add_field(name="Status", value=status_label, inline=True)
-
-    if snapshot.status in ("completed", "error", "cancelled"):
-        step_value = f"{snapshot.step_number} total"
-    elif snapshot.step_number > 0:
-        step_value = f"{snapshot.step_number}. {snapshot.current_step}"
-    else:
-        step_value = snapshot.current_step
-    embed.add_field(name="Step", value=step_value, inline=True)
-
-    embed.add_field(
-        name="Branches",
-        value=str(snapshot.active_thread_count),
-        inline=True,
-    )
-
-    # Row 2: Tokens, LLM Calls, Tools
+    elapsed_s = snapshot.elapsed_ms / 1000
     tok_in = f"{snapshot.token_usage.input_tokens:,}"
     tok_out = f"{snapshot.token_usage.output_tokens:,}"
-    embed.add_field(name="Tokens", value=f"{tok_in} in / {tok_out} out", inline=True)
+    status_label = snapshot.status.capitalize()
 
-    embed.add_field(name="LLM Calls", value=str(snapshot.llm_iterations), inline=True)
-
-    if snapshot.tools_used:
-        tools_str = f"{snapshot.tool_calls_made} ({', '.join(snapshot.tools_used)})"
+    # Line 1: status + step info
+    if snapshot.status in ("completed", "error", "cancelled"):
+        line1 = f"**{status_label}** · {snapshot.step_number} steps"
+    elif snapshot.step_number > 0:
+        line1 = f"**{status_label}** · Step {snapshot.step_number}: {snapshot.current_step}"
     else:
-        tools_str = str(snapshot.tool_calls_made)
-    embed.add_field(name="Tools", value=tools_str, inline=True)
+        line1 = f"**{status_label}** · {snapshot.current_step}"
 
-    # Row 3: Elapsed + optional error
-    elapsed_s = snapshot.elapsed_ms / 1000
-    embed.add_field(name="Elapsed", value=f"{elapsed_s:.1f}s", inline=True)
+    # Line 2: metrics
+    parts = [f"{tok_in} in / {tok_out} out"]
+    if snapshot.llm_iterations:
+        calls = "call" if snapshot.llm_iterations == 1 else "calls"
+        parts.append(f"{snapshot.llm_iterations} {calls}")
+    if snapshot.tool_calls_made:
+        parts.append(f"{snapshot.tool_calls_made} tools")
+    parts.append(f"{elapsed_s:.1f}s")
+    line2 = " · ".join(parts)
+
+    description = f"{line1}\n{line2}"
 
     if snapshot.error_message:
-        embed.add_field(name="Error", value=snapshot.error_message, inline=False)
+        description += f"\n**Error:** {snapshot.error_message}"
 
-    return embed
+    return discord.Embed(
+        title=f"{snapshot.agent_name} · branch #{snapshot.thread_id}",
+        description=description,
+        colour=colour,
+    )
 
 
 # ---------------------------------------------------------------------------
