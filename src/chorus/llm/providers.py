@@ -381,6 +381,14 @@ class OpenAIProvider:
                     )
                 )
 
+        # Extract cached token count from OpenAI's automatic prompt caching.
+        # OpenAI caches prompts with shared prefixes ≥1024 tokens automatically
+        # and reports usage via prompt_tokens_details.cached_tokens.
+        cached = 0
+        details = getattr(response.usage, "prompt_tokens_details", None)
+        if details is not None:
+            cached = getattr(details, "cached_tokens", 0) or 0
+
         return LLMResponse(
             content=message.content,
             tool_calls=tool_calls,
@@ -388,6 +396,7 @@ class OpenAIProvider:
             usage=Usage(
                 input_tokens=response.usage.prompt_tokens,
                 output_tokens=response.usage.completion_tokens,
+                cache_read_input_tokens=cached,
             ),
             model=response.model,
         )
