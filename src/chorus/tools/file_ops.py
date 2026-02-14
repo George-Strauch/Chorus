@@ -1,17 +1,14 @@
 """File operation tools for agent workspaces — create, str_replace, view.
 
-All paths are resolved relative to the agent's workspace root.
-Path traversal is prevented by resolving symlinks then checking
-the result is within the workspace jail.
+Relative paths resolve within the agent's workspace root.
+Absolute paths are used as-is, allowing agents to access the full filesystem.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
-
-if TYPE_CHECKING:
-    from pathlib import Path
+from pathlib import Path
+from typing import Any
 
 # ---------------------------------------------------------------------------
 # Errors
@@ -67,7 +64,7 @@ class FileResult:
 
 
 # ---------------------------------------------------------------------------
-# Path jail
+# Path resolution
 # ---------------------------------------------------------------------------
 
 
@@ -76,6 +73,8 @@ def resolve_in_workspace(workspace: Path, relative_path: str) -> Path:
 
     Symlinks are resolved **before** the containment check so they
     cannot be used to break out.
+
+    Used by self_edit.edit_docs to jail doc paths inside the docs/ directory.
     """
     resolved = (workspace / relative_path).resolve()
     workspace_resolved = workspace.resolve()
@@ -88,6 +87,13 @@ def resolve_in_workspace(workspace: Path, relative_path: str) -> Path:
     return resolved
 
 
+def resolve_path(workspace: Path, path: str) -> Path:
+    """Resolve a file path — relative to workspace, or absolute as-is."""
+    if Path(path).is_absolute():
+        return Path(path).resolve()
+    return (workspace / path).resolve()
+
+
 # ---------------------------------------------------------------------------
 # create_file
 # ---------------------------------------------------------------------------
@@ -98,8 +104,8 @@ async def create_file(
     path: str,
     content: str,
 ) -> FileResult:
-    """Create (or overwrite) a file inside the workspace."""
-    resolved = resolve_in_workspace(workspace, path)
+    """Create (or overwrite) a file. Relative paths resolve within workspace."""
+    resolved = resolve_path(workspace, path)
     resolved.parent.mkdir(parents=True, exist_ok=True)
     resolved.write_text(content, encoding="utf-8")
     return FileResult(path=path, action="created", success=True)
@@ -119,7 +125,7 @@ async def str_replace(
     new_str: str,
 ) -> FileResult:
     """Replace exactly one occurrence of *old_str* with *new_str* in a file."""
-    resolved = resolve_in_workspace(workspace, path)
+    resolved = resolve_path(workspace, path)
 
     if not resolved.exists():
         raise FileNotFoundInWorkspaceError(f"File not found: {path}")
@@ -195,7 +201,7 @@ async def view(
     limit:
         Number of lines to return (default: all).
     """
-    resolved = resolve_in_workspace(workspace, path)
+    resolved = resolve_path(workspace, path)
 
     if not resolved.exists():
         raise FileNotFoundInWorkspaceError(f"File not found: {path}")

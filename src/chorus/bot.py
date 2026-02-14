@@ -446,8 +446,11 @@ class ChorusBot(commands.Bot):
                 agent_name=agent.name,
                 thread_id=thread.id,
                 get_active_count=lambda: len(tm.list_active()),
+                reference=message,
             )
             await status_view.start()
+            if status_view.message is not None:
+                tm.register_bot_message(status_view.message.id, thread.id)
             if self._presence_manager:
                 await self._presence_manager.thread_started(agent.name, thread.id)
 
@@ -499,24 +502,19 @@ class ChorusBot(commands.Bot):
                     on_event=on_event,
                 )
 
-                # Send response to Discord
-                if result.content:
-                    # Truncate to Discord's 2000 char limit, with thread ID suffix
-                    thread_tag = f"\n-# branch {thread.id}"
-                    max_content = 2000 - len(thread_tag)
-                    content = result.content[:max_content] + thread_tag
-                    bot_msg = await message.channel.send(content, reference=message)
-                    tm.register_bot_message(bot_msg.id, thread.id)
+                # Finalize status embed with response content
+                await status_view.finalize(
+                    "completed", response_content=result.content
+                )
 
-                    # Persist assistant message
+                # Persist assistant message using the status embed message
+                if result.content and status_view.message is not None:
                     await cm.persist_message(
                         role="assistant",
                         content=result.content,
                         thread_id=thread.id,
-                        discord_message_id=bot_msg.id,
+                        discord_message_id=status_view.message.id,
                     )
-
-                await status_view.finalize("completed")
             except Exception as exc:
                 await status_view.finalize("error", error=str(exc))
                 raise
