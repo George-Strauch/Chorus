@@ -143,6 +143,7 @@ PRESETS: dict[str, PermissionProfile] = {
             r"tool:claude_code:.*",
             r"tool:run_concurrent:.*",
             r"tool:run_background:.*",
+            r"tool:add_process_hooks:.*",
         ],
     ),
     "guarded": PermissionProfile(

@@ -37,6 +37,7 @@ _CONTEXT_INJECTED_PARAMS = frozenset({
     "workspace", "profile", "agent_name", "chorus_home",
     "is_admin", "db", "host_execution",
     "process_manager", "branch_id", "on_tool_progress",
+    "hook_dispatcher",
 })
 
 logger = logging.getLogger("chorus.llm.tool_loop")
@@ -73,6 +74,7 @@ _TOOL_TO_CATEGORY: dict[str, str] = {
     "claude_code": "claude_code",
     "run_concurrent": "run_concurrent",
     "run_background": "run_background",
+    "add_process_hooks": "add_process_hooks",
 }
 
 
@@ -112,6 +114,8 @@ def _build_action_string(tool_name: str, arguments: dict[str, Any]) -> str:
         detail = arguments.get("task", "")[:100]
     elif category in ("run_concurrent", "run_background"):
         detail = arguments.get("command", str(arguments))
+    elif category == "add_process_hooks":
+        detail = str(arguments.get("pid", ""))
     elif category == "web_search":
         detail = "enabled"
     else:
@@ -208,6 +212,7 @@ class ToolExecutionContext:
     db: Any = None
     host_execution: bool = False
     process_manager: Any = None
+    hook_dispatcher: Any = None
     branch_id: int | None = None
     on_tool_progress: Any = None  # Callable[[dict], Any] | None
 
@@ -346,6 +351,8 @@ async def _execute_tool(
         kwargs["host_execution"] = ctx.host_execution
     if "process_manager" in sig.parameters and "process_manager" not in arguments:
         kwargs["process_manager"] = ctx.process_manager
+    if "hook_dispatcher" in sig.parameters and "hook_dispatcher" not in arguments:
+        kwargs["hook_dispatcher"] = ctx.hook_dispatcher
     if "branch_id" in sig.parameters and "branch_id" not in arguments:
         kwargs["branch_id"] = ctx.branch_id
     if "on_tool_progress" in sig.parameters and "on_tool_progress" not in arguments:

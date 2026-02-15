@@ -37,7 +37,8 @@ Each callback object has these fields:
   "action": "stop_process" | "stop_branch" | "inject_context" | "spawn_branch" | "notify_channel",
   "context_message": "string — passed to the action handler as context",
   "output_delay_seconds": number,  // wait before firing on_output_match (default 2.0)
-  "max_fires": integer             // how many times this callback can fire (default 1)
+  "max_fires": integer,            // how many times this callback can fire (default 1)
+  "min_message_interval": number   // rate-limit seconds between notify_channel fires (default 180)
 }
 ```
 
@@ -129,7 +130,11 @@ branch what to do. It will be the opening message in a new autonomous LLM conver
 context_message that describes what the next step should do.
 - Use inject_context when you want the CURRENT branch to react (it must still be running).
 - Use spawn_branch when you want a NEW branch to handle something autonomously.
+- max_fires: 0 means unlimited (fire every time). max_fires: N (N>0) means fire at most N times.
+- For on_output_match hooks, default to max_fires: 0 (unlimited) unless the user specifies a limit.
+- For on_exit and on_timeout hooks, default to max_fires: 1 unless the user specifies otherwise.
 - Use max_fires > 1 for repeating triggers (e.g. restart on every failure, up to 3 times).
+- For notify_channel with on_output_match, min_message_interval rate-limits notifications (default 180s / 3 min).
 
 Respond ONLY with a JSON array. No explanation.
 """
@@ -254,7 +259,11 @@ def _parse_single_callback(
     elif output_delay is None:
         output_delay = 0.0
 
-    max_fires = item.get("max_fires", 1)
+    max_fires = item.get("max_fires")
+    if max_fires is None:
+        max_fires = 0 if trigger_type == TriggerType.ON_OUTPUT_MATCH else 1
+
+    min_message_interval = item.get("min_message_interval", 180.0)
 
     return ProcessCallback(
         trigger=trigger,
@@ -262,4 +271,5 @@ def _parse_single_callback(
         context_message=context_message,
         output_delay_seconds=output_delay,
         max_fires=max_fires,
+        min_message_interval=min_message_interval,
     )

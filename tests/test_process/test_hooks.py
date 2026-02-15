@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from collections import deque
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -341,6 +342,26 @@ class TestSafety:
         assert mock_pm.kill_process.await_count == 2
 
     @pytest.mark.asyncio
+    async def test_max_fires_zero_unlimited(
+        self, dispatcher: HookDispatcher, mock_pm: MagicMock
+    ) -> None:
+        """max_fires=0 means unlimited — callback never becomes exhausted."""
+        cb = ProcessCallback(
+            trigger=HookTrigger(type=TriggerType.ON_OUTPUT_MATCH, pattern=r"hit"),
+            action=CallbackAction.STOP_PROCESS,
+            max_fires=0,
+        )
+        tracked = _make_tracked(callbacks=[cb])
+        mock_pm.get_process.return_value = tracked
+
+        for i in range(10):
+            await dispatcher._on_line(100, "stdout", f"hit {i}")
+
+        assert cb.fire_count == 10
+        assert not cb.exhausted
+        assert mock_pm.kill_process.await_count == 10
+
+    @pytest.mark.asyncio
     async def test_no_spawner_configured(
         self, mock_pm: MagicMock
     ) -> None:
@@ -476,6 +497,60 @@ class TestOnSpawn:
         mock_pm.kill_process.assert_awaited()
 
 
+class TestStartNewTimeoutWatchers:
+    @pytest.mark.asyncio
+    async def test_start_new_timeout_watchers_only_new(
+        self, mock_pm: MagicMock
+    ) -> None:
+        """start_new_timeout_watchers only starts watchers for the given callbacks."""
+        # Existing callback (already has a watcher)
+        existing_cb = ProcessCallback(
+            trigger=HookTrigger(type=TriggerType.ON_TIMEOUT, timeout_seconds=10.0),
+            action=CallbackAction.STOP_PROCESS,
+        )
+        # New callback to add
+        new_cb = ProcessCallback(
+            trigger=HookTrigger(type=TriggerType.ON_TIMEOUT, timeout_seconds=0.1),
+            action=CallbackAction.STOP_PROCESS,
+        )
+        tracked = _make_tracked(callbacks=[existing_cb, new_cb])
+        mock_pm.get_process.return_value = tracked
+
+        dispatcher = HookDispatcher(
+            process_manager=mock_pm,
+            default_output_delay=0.0,
+        )
+
+        # Only pass the new callback
+        dispatcher.start_new_timeout_watchers(100, [new_cb])
+
+        # Wait for the short timeout to fire
+        await asyncio.sleep(0.2)
+        assert new_cb.fire_count == 1
+        # Existing callback should NOT have fired (10s timeout, not started)
+        assert existing_cb.fire_count == 0
+
+    def test_start_new_timeout_watchers_ignores_non_timeout(
+        self, mock_pm: MagicMock
+    ) -> None:
+        """start_new_timeout_watchers ignores non-timeout callbacks."""
+        cb = ProcessCallback(
+            trigger=HookTrigger(type=TriggerType.ON_EXIT),
+            action=CallbackAction.NOTIFY_CHANNEL,
+        )
+        tracked = _make_tracked(callbacks=[cb])
+        mock_pm.get_process.return_value = tracked
+
+        dispatcher = HookDispatcher(
+            process_manager=mock_pm,
+            default_output_delay=0.0,
+        )
+        # Should not raise or create tasks
+        dispatcher.start_new_timeout_watchers(100, [cb])
+        # No timeout tasks should have been created
+        assert 100 not in dispatcher._timeout_tasks
+
+
 class TestOnTimeoutTrigger:
     @pytest.mark.asyncio
     async def test_timeout_fires(
@@ -521,3 +596,134 @@ class TestOnTimeoutTrigger:
         assert cb_timeout.fire_count == 0
         # Exit callback SHOULD have fired
         assert cb_exit.fire_count == 1
+
+
+# ---------------------------------------------------------------------------
+# NOTIFY_CHANNEL rate limiting
+# ---------------------------------------------------------------------------
+
+
+class TestNotifyRateLimit:
+    @pytest.mark.asyncio
+    async def test_notify_rate_limited(
+        self, mock_pm: MagicMock
+    ) -> None:
+        """Rapid NOTIFY_CHANNEL fires are suppressed after the first."""
+        notify_cb = AsyncMock()
+        dispatcher = HookDispatcher(
+            process_manager=mock_pm,
+            notify_callback=notify_cb,
+            default_output_delay=0.0,
+        )
+        cb = ProcessCallback(
+            trigger=HookTrigger(type=TriggerType.ON_OUTPUT_MATCH, pattern=r"ERROR"),
+            action=CallbackAction.NOTIFY_CHANNEL,
+            context_message="Error detected",
+            max_fires=0,
+            min_message_interval=60.0,
+        )
+        tracked = _make_tracked(callbacks=[cb])
+        mock_pm.get_process.return_value = tracked
+
+        # Fire 5 times rapidly — only 1st should go through
+        for _ in range(5):
+            await dispatcher._on_line(100, "stdout", "ERROR: boom")
+
+        assert cb.fire_count == 1
+        assert notify_cb.await_count == 1
+        assert cb._skipped_fires == 4
+
+    @pytest.mark.asyncio
+    async def test_notify_skipped_count_in_next_message(
+        self, mock_pm: MagicMock
+    ) -> None:
+        """After cooldown, the next notification includes skipped count."""
+        notify_cb = AsyncMock()
+        dispatcher = HookDispatcher(
+            process_manager=mock_pm,
+            notify_callback=notify_cb,
+            default_output_delay=0.0,
+        )
+        cb = ProcessCallback(
+            trigger=HookTrigger(type=TriggerType.ON_OUTPUT_MATCH, pattern=r"ERROR"),
+            action=CallbackAction.NOTIFY_CHANNEL,
+            context_message="Error detected",
+            max_fires=0,
+            min_message_interval=60.0,
+        )
+        tracked = _make_tracked(callbacks=[cb])
+        mock_pm.get_process.return_value = tracked
+
+        # First fire goes through
+        await dispatcher._on_line(100, "stdout", "ERROR: first")
+        assert cb.fire_count == 1
+
+        # Suppress 3 more
+        for _ in range(3):
+            await dispatcher._on_line(100, "stdout", "ERROR: repeated")
+        assert cb._skipped_fires == 3
+
+        # Simulate cooldown elapsed by rewinding _last_notify_time
+        cb._last_notify_time = time.monotonic() - 120.0
+
+        # Next fire should go through and mention 3 suppressed
+        await dispatcher._on_line(100, "stdout", "ERROR: after cooldown")
+        assert cb.fire_count == 2
+        assert cb._skipped_fires == 0
+
+        # Check that the notification context includes suppressed count
+        last_call = notify_cb.call_args_list[-1]
+        context_arg = last_call[0][1]
+        assert "3 notification(s) suppressed" in context_arg
+
+    @pytest.mark.asyncio
+    async def test_rate_limit_does_not_affect_other_actions(
+        self, mock_pm: MagicMock
+    ) -> None:
+        """STOP_PROCESS and other actions are not rate-limited."""
+        dispatcher = HookDispatcher(
+            process_manager=mock_pm,
+            default_output_delay=0.0,
+        )
+        cb = ProcessCallback(
+            trigger=HookTrigger(type=TriggerType.ON_OUTPUT_MATCH, pattern=r"ERROR"),
+            action=CallbackAction.STOP_PROCESS,
+            max_fires=0,
+            min_message_interval=60.0,
+        )
+        tracked = _make_tracked(callbacks=[cb])
+        mock_pm.get_process.return_value = tracked
+
+        for _ in range(5):
+            await dispatcher._on_line(100, "stdout", "ERROR: boom")
+
+        # All 5 should fire — rate limit only applies to NOTIFY_CHANNEL
+        assert cb.fire_count == 5
+        assert mock_pm.kill_process.await_count == 5
+
+    @pytest.mark.asyncio
+    async def test_notify_rate_limit_zero_disables(
+        self, mock_pm: MagicMock
+    ) -> None:
+        """min_message_interval=0 disables rate limiting."""
+        notify_cb = AsyncMock()
+        dispatcher = HookDispatcher(
+            process_manager=mock_pm,
+            notify_callback=notify_cb,
+            default_output_delay=0.0,
+        )
+        cb = ProcessCallback(
+            trigger=HookTrigger(type=TriggerType.ON_OUTPUT_MATCH, pattern=r"ERROR"),
+            action=CallbackAction.NOTIFY_CHANNEL,
+            max_fires=0,
+            min_message_interval=0,
+        )
+        tracked = _make_tracked(callbacks=[cb])
+        mock_pm.get_process.return_value = tracked
+
+        for _ in range(5):
+            await dispatcher._on_line(100, "stdout", "ERROR: boom")
+
+        # All 5 should fire — rate limiting disabled
+        assert cb.fire_count == 5
+        assert notify_cb.await_count == 5

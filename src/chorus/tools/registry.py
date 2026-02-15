@@ -565,7 +565,7 @@ def create_default_registry() -> ToolRegistry:
 
     # -- Process runner tools --------------------------------------------------
 
-    from chorus.tools.run_process import run_background, run_concurrent
+    from chorus.tools.run_process import add_process_hooks, run_background, run_concurrent
 
     registry.register(
         ToolDefinition(
@@ -685,6 +685,37 @@ def create_default_registry() -> ToolRegistry:
                 "required": ["command"],
             },
             handler=run_background,
+        )
+    )
+
+    registry.register(
+        ToolDefinition(
+            name="add_process_hooks",
+            description=(
+                "Add hooks to an already-running process. Use this when you want to "
+                "attach monitoring or reactions to a process that was started without "
+                "hooks, or add additional hooks to one that already has some.\n\n"
+                "The 'instructions' parameter is the same natural language format as "
+                "run_concurrent/run_background — it gets translated into hook callbacks."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "pid": {
+                        "type": "integer",
+                        "description": "PID of the running process to add hooks to",
+                    },
+                    "instructions": {
+                        "type": "string",
+                        "description": (
+                            "Natural language instructions for the new hooks. "
+                            "Same format as run_concurrent/run_background instructions."
+                        ),
+                    },
+                },
+                "required": ["pid", "instructions"],
+            },
+            handler=add_process_hooks,
         )
     )
 

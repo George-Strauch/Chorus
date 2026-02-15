@@ -1,4 +1,4 @@
-"""Process runner tools — run_concurrent and run_background."""
+"""Process runner tools — run_concurrent, run_background, add_process_hooks."""
 
 from __future__ import annotations
 
@@ -7,13 +7,14 @@ import os
 from typing import TYPE_CHECKING, Any
 
 from chorus.process.callback_builder import build_callbacks_from_instructions
-from chorus.process.models import ProcessType
+from chorus.process.models import ProcessStatus, ProcessType
 from chorus.tools.bash import CommandBlockedError, _check_blocklist
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     from chorus.permissions.engine import PermissionProfile
+    from chorus.process.hooks import HookDispatcher
     from chorus.process.manager import ProcessManager
 
 logger = logging.getLogger("chorus.tools.run_process")
@@ -209,5 +210,53 @@ async def run_background(
             f"Background process started (PID {tracked.pid}). "
             f"It will continue after this branch ends. "
             f"{len(callbacks)} callback(s) configured."
+        ),
+    }
+
+
+async def add_process_hooks(
+    pid: int,
+    instructions: str,
+    *,
+    agent_name: str,
+    process_manager: ProcessManager,
+    hook_dispatcher: HookDispatcher,
+) -> dict[str, Any]:
+    """Add hooks to a running process.
+
+    Parameters
+    ----------
+    pid:
+        PID of the running process to add hooks to.
+    instructions:
+        Natural language instructions for the new hooks.
+    """
+    tracked = process_manager.get_process(pid)
+    if tracked is None:
+        return {"error": f"No process found with PID {pid}"}
+    if tracked.agent_name != agent_name:
+        return {"error": f"Process {pid} belongs to agent '{tracked.agent_name}', not '{agent_name}'"}
+    if tracked.status != ProcessStatus.RUNNING:
+        return {"error": f"Process {pid} is not running (status: {tracked.status.value})"}
+
+    callbacks = await build_callbacks_from_instructions(
+        instructions=instructions,
+        command=tracked.command,
+    )
+
+    result = await process_manager.add_callbacks(pid, callbacks)
+    if result is None:
+        return {"error": f"Failed to add callbacks to process {pid} (it may have exited)"}
+
+    hook_dispatcher.start_new_timeout_watchers(pid, callbacks)
+
+    return {
+        "pid": pid,
+        "added": len(callbacks),
+        "total": len(result.callbacks),
+        "callbacks": [cb.to_dict() for cb in callbacks],
+        "message": (
+            f"Added {len(callbacks)} hook(s) to process {pid}. "
+            f"Total hooks: {len(result.callbacks)}."
         ),
     }

@@ -11,6 +11,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from chorus.process.models import (
+    CallbackAction,
     ExitFilter,
     ProcessCallback,
     ProcessStatus,
@@ -82,7 +83,17 @@ def _format_hook(cb: ProcessCallback) -> str:
         return f"~~{plain_trigger} \u2192 {action_str}~~ (exhausted)"
 
     line = f"{trigger_desc} \u2192 {action_str}"
-    line += f"\n\u2003fires: {cb.fire_count}/{cb.max_fires}"
+    max_display = "\u221e" if cb.max_fires == 0 else str(cb.max_fires)
+    line += f"\n\u2003fires: {cb.fire_count}/{max_display}"
+    if cb.action == CallbackAction.NOTIFY_CHANNEL and cb.min_message_interval > 0:
+        secs = cb.min_message_interval
+        if secs >= 3600 and secs % 3600 == 0:
+            interval_str = f"{int(secs // 3600)}h"
+        elif secs >= 60 and secs % 60 == 0:
+            interval_str = f"{int(secs // 60)}m"
+        else:
+            interval_str = f"{secs}s"
+        line += f" interval: {interval_str}"
     return line
 
 

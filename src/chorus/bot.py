@@ -576,6 +576,7 @@ class ChorusBot(commands.Bot):
                 db=self.db,
                 host_execution=self.config.host_execution,
                 process_manager=self._process_manager,
+                hook_dispatcher=self._hook_dispatcher,
                 branch_id=target_thread.id,
             )
             # Note: on_tool_progress is set after status_view is created (below)

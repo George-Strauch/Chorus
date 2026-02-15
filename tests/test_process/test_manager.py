@@ -363,6 +363,122 @@ async def test_python_output_arrives_before_exit(
 
 
 @pytest.mark.asyncio
+async def test_add_callbacks_appends(pm: ProcessManager, workspace: Path) -> None:
+    """add_callbacks appends new callbacks to a running process."""
+    from chorus.process.models import (
+        CallbackAction,
+        HookTrigger,
+        ProcessCallback,
+        TriggerType,
+    )
+
+    tracked = await pm.spawn(
+        command="sleep 60",
+        workspace=workspace,
+        agent_name="test-agent",
+        process_type=ProcessType.BACKGROUND,
+    )
+    assert len(tracked.callbacks) == 0
+
+    cb = ProcessCallback(
+        trigger=HookTrigger(type=TriggerType.ON_EXIT),
+        action=CallbackAction.NOTIFY_CHANNEL,
+        context_message="Done!",
+    )
+    result = await pm.add_callbacks(tracked.pid, [cb])
+    assert result is not None
+    assert len(result.callbacks) == 1
+    assert result.callbacks[0].action == CallbackAction.NOTIFY_CHANNEL
+
+    await pm.kill_process(tracked.pid)
+
+
+@pytest.mark.asyncio
+async def test_add_callbacks_nonexistent_returns_none(pm: ProcessManager) -> None:
+    """add_callbacks returns None for unknown PID."""
+    from chorus.process.models import (
+        CallbackAction,
+        HookTrigger,
+        ProcessCallback,
+        TriggerType,
+    )
+
+    cb = ProcessCallback(
+        trigger=HookTrigger(type=TriggerType.ON_EXIT),
+        action=CallbackAction.NOTIFY_CHANNEL,
+    )
+    result = await pm.add_callbacks(999999, [cb])
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_add_callbacks_exited_returns_none(
+    pm: ProcessManager, workspace: Path
+) -> None:
+    """add_callbacks returns None for an exited process."""
+    import asyncio as _asyncio
+
+    from chorus.process.models import (
+        CallbackAction,
+        HookTrigger,
+        ProcessCallback,
+        TriggerType,
+    )
+
+    tracked = await pm.spawn(
+        command="true",  # Exits immediately
+        workspace=workspace,
+        agent_name="test-agent",
+        process_type=ProcessType.BACKGROUND,
+    )
+    await _asyncio.sleep(0.5)  # Wait for exit
+
+    cb = ProcessCallback(
+        trigger=HookTrigger(type=TriggerType.ON_EXIT),
+        action=CallbackAction.NOTIFY_CHANNEL,
+    )
+    result = await pm.add_callbacks(tracked.pid, [cb])
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_add_callbacks_persists_to_db(
+    pm: ProcessManager, workspace: Path, db: Database
+) -> None:
+    """add_callbacks persists updated callbacks to the database."""
+    import json
+
+    from chorus.process.models import (
+        CallbackAction,
+        HookTrigger,
+        ProcessCallback,
+        TriggerType,
+    )
+
+    tracked = await pm.spawn(
+        command="sleep 60",
+        workspace=workspace,
+        agent_name="test-agent",
+        process_type=ProcessType.BACKGROUND,
+    )
+
+    cb = ProcessCallback(
+        trigger=HookTrigger(type=TriggerType.ON_EXIT),
+        action=CallbackAction.SPAWN_BRANCH,
+        context_message="Fix the issue",
+    )
+    await pm.add_callbacks(tracked.pid, [cb])
+
+    row = await db.get_process(tracked.pid)
+    assert row is not None
+    callbacks_data = json.loads(row["callbacks_json"])
+    assert len(callbacks_data) == 1
+    assert callbacks_data[0]["action"] == "spawn_branch"
+
+    await pm.kill_process(tracked.pid)
+
+
+@pytest.mark.asyncio
 async def test_stdbuf_wraps_command(pm: ProcessManager, workspace: Path) -> None:
     """Spawned commands are wrapped with stdbuf -oL when available."""
     from chorus.process.manager import _STDBUF_PATH

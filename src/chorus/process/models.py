@@ -114,10 +114,15 @@ class ProcessCallback:
     output_delay_seconds: float = 0.0
     max_fires: int = 1
     fire_count: int = 0
+    min_message_interval: float = 180.0
+
+    # Transient runtime state (not serialized)
+    _skipped_fires: int = field(init=False, repr=False, default=0, compare=False)
+    _last_notify_time: float = field(init=False, repr=False, default=0.0, compare=False)
 
     @property
     def exhausted(self) -> bool:
-        return self.fire_count >= self.max_fires
+        return self.max_fires > 0 and self.fire_count >= self.max_fires
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -127,6 +132,7 @@ class ProcessCallback:
             "output_delay_seconds": self.output_delay_seconds,
             "max_fires": self.max_fires,
             "fire_count": self.fire_count,
+            "min_message_interval": self.min_message_interval,
         }
 
     @classmethod
@@ -138,6 +144,7 @@ class ProcessCallback:
             output_delay_seconds=data.get("output_delay_seconds", 0.0),
             max_fires=data.get("max_fires", 1),
             fire_count=data.get("fire_count", 0),
+            min_message_interval=data.get("min_message_interval", 180.0),
         )
 
 

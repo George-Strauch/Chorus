@@ -337,6 +337,29 @@ class ProcessManager:
                 "Process recovery: %d tracked, %d marked lost", recovered, lost
             )
 
+    async def add_callbacks(
+        self, pid: int, callbacks: list[ProcessCallback]
+    ) -> TrackedProcess | None:
+        """Add callbacks to a running process.
+
+        Returns the TrackedProcess if found and still running, None otherwise.
+        """
+        async with self._lock:
+            tracked = self._processes.get(pid)
+            if tracked is None or tracked.status != ProcessStatus.RUNNING:
+                return None
+            tracked.callbacks.extend(callbacks)
+
+        await self._persist_callbacks(tracked)
+        return tracked
+
+    async def _persist_callbacks(self, tracked: TrackedProcess) -> None:
+        """Serialize all callbacks and update the DB."""
+        if self._db is None:
+            return
+        callbacks_json = json.dumps([cb.to_dict() for cb in tracked.callbacks])
+        await self._db.update_process_callbacks(tracked.pid, callbacks_json)
+
     # ── DB persistence ──────────────────────────────────────────────
 
     async def _persist_process(self, tracked: TrackedProcess) -> None:

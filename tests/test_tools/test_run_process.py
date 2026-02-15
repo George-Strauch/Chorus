@@ -1,4 +1,4 @@
-"""Tests for chorus.tools.run_process — run_concurrent and run_background."""
+"""Tests for chorus.tools.run_process — run_concurrent, run_background, add_process_hooks."""
 
 from __future__ import annotations
 
@@ -8,8 +8,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from chorus.permissions.engine import PermissionProfile
-from chorus.process.models import ProcessCallback, ProcessType, TrackedProcess
-from chorus.tools.run_process import run_background, run_concurrent
+from chorus.process.models import (
+    ProcessCallback,
+    ProcessStatus,
+    ProcessType,
+    TrackedProcess,
+)
+from chorus.tools.run_process import add_process_hooks, run_background, run_concurrent
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -480,3 +485,171 @@ class TestRegistration:
         tool = registry.get("run_background")
         assert tool is not None
         assert tool.name == "run_background"
+
+    def test_add_process_hooks_registered(self) -> None:
+        from chorus.tools.registry import create_default_registry
+
+        registry = create_default_registry()
+        tool = registry.get("add_process_hooks")
+        assert tool is not None
+        assert tool.name == "add_process_hooks"
+
+
+# ---------------------------------------------------------------------------
+# add_process_hooks
+# ---------------------------------------------------------------------------
+
+
+class TestAddProcessHooks:
+    @pytest.fixture
+    def mock_hook_dispatcher(self) -> MagicMock:
+        hd = MagicMock()
+        hd.start_new_timeout_watchers = MagicMock()
+        return hd
+
+    @pytest.fixture
+    def mock_pm(self) -> MagicMock:
+        """A MagicMock ProcessManager (not AsyncMock) so get_process returns sync."""
+        pm = MagicMock()
+        pm.add_callbacks = AsyncMock()
+        return pm
+
+    @pytest.mark.asyncio
+    async def test_add_hooks_success(
+        self,
+        mock_pm: MagicMock,
+        mock_hook_dispatcher: MagicMock,
+    ) -> None:
+        """Successfully adds hooks to a running process."""
+        tracked = _make_tracked(
+            pid=42,
+            agent_name="test-agent",
+            status=ProcessStatus.RUNNING,
+            callbacks=[],
+        )
+        mock_pm.get_process.return_value = tracked
+        mock_pm.add_callbacks.return_value = tracked
+
+        mock_cb = MagicMock(spec=ProcessCallback)
+        mock_cb.to_dict.return_value = {"trigger": {"type": "on_exit"}, "action": "notify_channel"}
+
+        with patch(
+            "chorus.tools.run_process.build_callbacks_from_instructions",
+            new_callable=AsyncMock,
+            return_value=[mock_cb],
+        ):
+            result = await add_process_hooks(
+                pid=42,
+                instructions="notify me when done",
+                agent_name="test-agent",
+                process_manager=mock_pm,
+                hook_dispatcher=mock_hook_dispatcher,
+            )
+
+        assert result["pid"] == 42
+        assert result["added"] == 1
+        assert "message" in result
+        mock_pm.add_callbacks.assert_awaited_once()
+        mock_hook_dispatcher.start_new_timeout_watchers.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_add_hooks_wrong_agent(
+        self,
+        mock_pm: MagicMock,
+        mock_hook_dispatcher: MagicMock,
+    ) -> None:
+        """Returns error when process belongs to a different agent."""
+        tracked = _make_tracked(
+            pid=42,
+            agent_name="other-agent",
+            status=ProcessStatus.RUNNING,
+        )
+        mock_pm.get_process.return_value = tracked
+
+        result = await add_process_hooks(
+            pid=42,
+            instructions="notify me",
+            agent_name="test-agent",
+            process_manager=mock_pm,
+            hook_dispatcher=mock_hook_dispatcher,
+        )
+
+        assert "error" in result
+        assert "other-agent" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_add_hooks_not_running(
+        self,
+        mock_pm: MagicMock,
+        mock_hook_dispatcher: MagicMock,
+    ) -> None:
+        """Returns error when process is not running."""
+        tracked = _make_tracked(
+            pid=42,
+            agent_name="test-agent",
+            status=ProcessStatus.EXITED,
+        )
+        mock_pm.get_process.return_value = tracked
+
+        result = await add_process_hooks(
+            pid=42,
+            instructions="notify me",
+            agent_name="test-agent",
+            process_manager=mock_pm,
+            hook_dispatcher=mock_hook_dispatcher,
+        )
+
+        assert "error" in result
+        assert "not running" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_add_hooks_nonexistent_pid(
+        self,
+        mock_pm: MagicMock,
+        mock_hook_dispatcher: MagicMock,
+    ) -> None:
+        """Returns error for unknown PID."""
+        mock_pm.get_process.return_value = None
+
+        result = await add_process_hooks(
+            pid=99999,
+            instructions="notify me",
+            agent_name="test-agent",
+            process_manager=mock_pm,
+            hook_dispatcher=mock_hook_dispatcher,
+        )
+
+        assert "error" in result
+        assert "99999" in result["error"]
+
+
+# ---------------------------------------------------------------------------
+# add_process_hooks: permission and category mapping
+# ---------------------------------------------------------------------------
+
+
+class TestAddProcessHooksPermissions:
+    def test_add_process_hooks_ask_in_standard(self) -> None:
+        from chorus.permissions.engine import PRESETS, PermissionResult, check
+
+        profile = PRESETS["standard"]
+        result = check("tool:add_process_hooks:42", profile)
+        assert result == PermissionResult.ASK
+
+    def test_add_process_hooks_allow_in_open(self) -> None:
+        from chorus.permissions.engine import PRESETS, PermissionResult, check
+
+        profile = PRESETS["open"]
+        result = check("tool:add_process_hooks:42", profile)
+        assert result == PermissionResult.ALLOW
+
+    def test_action_string_uses_pid(self) -> None:
+        from chorus.llm.tool_loop import _build_action_string
+
+        action = _build_action_string("add_process_hooks", {"pid": 42})
+        assert action == "tool:add_process_hooks:42"
+
+    def test_tool_to_category_mapped(self) -> None:
+        from chorus.llm.tool_loop import _TOOL_TO_CATEGORY
+
+        assert _TOOL_TO_CATEGORY["add_process_hooks"] == "add_process_hooks"

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections.abc import Callable, Coroutine
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -107,6 +108,24 @@ class HookDispatcher:
         if tracked is None:
             return
         for cb in tracked.callbacks:
+            if (
+                cb.trigger.type == TriggerType.ON_TIMEOUT
+                and cb.trigger.timeout_seconds is not None
+                and not cb.exhausted
+            ):
+                task = asyncio.create_task(
+                    self._timeout_watcher(pid, cb)
+                )
+                self._timeout_tasks[pid] = task
+
+    def start_new_timeout_watchers(
+        self, pid: int, new_callbacks: list[ProcessCallback]
+    ) -> None:
+        """Start ON_TIMEOUT watchers for newly-added callbacks only."""
+        tracked = self._pm.get_process(pid)
+        if tracked is None:
+            return
+        for cb in new_callbacks:
             if (
                 cb.trigger.type == TriggerType.ON_TIMEOUT
                 and cb.trigger.timeout_seconds is not None
@@ -237,6 +256,13 @@ class HookDispatcher:
         self, pid: int, cb: ProcessCallback, context: str
     ) -> None:
         """Increment fire count and dispatch the action."""
+        # Rate-limit NOTIFY_CHANNEL notifications
+        if cb.action == CallbackAction.NOTIFY_CHANNEL and cb.min_message_interval > 0:
+            now = time.monotonic()
+            if cb._last_notify_time > 0 and now - cb._last_notify_time < cb.min_message_interval:
+                cb._skipped_fires += 1
+                return
+
         cb.fire_count += 1
 
         tracked = self._pm.get_process(pid)
@@ -249,6 +275,18 @@ class HookDispatcher:
             full_context = f"{full_context}\n\n{context}"
         elif context:
             full_context = context
+
+        # Prepend skipped notification count if any were suppressed
+        if action == CallbackAction.NOTIFY_CHANNEL and cb._skipped_fires > 0:
+            skipped_note = (
+                f"\u26a0\ufe0f {cb._skipped_fires} notification(s) suppressed "
+                f"in the last {cb.min_message_interval}s\n\n"
+            )
+            full_context = skipped_note + full_context
+            cb._skipped_fires = 0
+
+        if action == CallbackAction.NOTIFY_CHANNEL:
+            cb._last_notify_time = time.monotonic()
 
         logger.info(
             "Firing callback %s for pid %d (fire %d/%d)",

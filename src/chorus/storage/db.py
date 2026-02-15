@@ -744,6 +744,14 @@ class Database:
             rows = await cursor.fetchall()
         return [self._row_to_process(row) for row in rows]
 
+    async def update_process_callbacks(self, pid: int, callbacks_json: str) -> None:
+        """Update the callbacks_json for a process."""
+        await self.connection.execute(
+            "UPDATE processes SET callbacks_json = ? WHERE pid = ?",
+            (callbacks_json, pid),
+        )
+        await self.connection.commit()
+
     @staticmethod
     def _row_to_process(row: Any) -> dict[str, Any]:
         """Convert a processes table row tuple to a dict."""

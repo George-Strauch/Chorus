@@ -36,6 +36,35 @@ class TestParseSingleCallback:
         assert cb.output_delay_seconds == 0.0
         assert cb.max_fires == 1
 
+    def test_output_match_defaults_to_unlimited(self) -> None:
+        """on_output_match without explicit max_fires defaults to 0 (unlimited)."""
+        item = {
+            "trigger": {"type": "on_output_match", "pattern": "ERROR"},
+            "action": "stop_process",
+        }
+        cb = _parse_single_callback(item, default_output_delay=2.0)
+        assert cb.trigger.type == TriggerType.ON_OUTPUT_MATCH
+        assert cb.max_fires == 0
+
+    def test_on_exit_defaults_to_one_fire(self) -> None:
+        """on_exit without explicit max_fires defaults to 1."""
+        item = {
+            "trigger": {"type": "on_exit"},
+            "action": "spawn_branch",
+        }
+        cb = _parse_single_callback(item, default_output_delay=2.0)
+        assert cb.max_fires == 1
+
+    def test_explicit_max_fires_respected(self) -> None:
+        """Explicit max_fires overrides the trigger-type default."""
+        item = {
+            "trigger": {"type": "on_output_match", "pattern": "ERROR"},
+            "action": "stop_process",
+            "max_fires": 5,
+        }
+        cb = _parse_single_callback(item, default_output_delay=2.0)
+        assert cb.max_fires == 5
+
     def test_full(self) -> None:
         item = {
             "trigger": {
@@ -185,3 +214,29 @@ class TestBuildCallbacksFromInstructions:
 
         assert len(cbs) == 1
         assert cbs[0].action == CallbackAction.NOTIFY_CHANNEL
+
+
+# ---------------------------------------------------------------------------
+# min_message_interval tests
+# ---------------------------------------------------------------------------
+
+
+class TestMinMessageInterval:
+    def test_min_message_interval_parsed(self) -> None:
+        """Explicit min_message_interval is parsed from LLM JSON."""
+        item = {
+            "trigger": {"type": "on_output_match", "pattern": "ERROR"},
+            "action": "notify_channel",
+            "min_message_interval": 60.0,
+        }
+        cb = _parse_single_callback(item, default_output_delay=2.0)
+        assert cb.min_message_interval == 60.0
+
+    def test_min_message_interval_default(self) -> None:
+        """Default min_message_interval is 180.0."""
+        item = {
+            "trigger": {"type": "on_output_match", "pattern": "ERROR"},
+            "action": "notify_channel",
+        }
+        cb = _parse_single_callback(item, default_output_delay=2.0)
+        assert cb.min_message_interval == 180.0
