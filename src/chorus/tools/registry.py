@@ -560,6 +560,76 @@ def create_default_registry() -> ToolRegistry:
         )
     )
 
+    # -- Process runner tools --------------------------------------------------
+
+    from chorus.tools.run_process import run_background, run_concurrent
+
+    registry.register(
+        ToolDefinition(
+            name="run_concurrent",
+            description=(
+                "Start a long-running process that runs alongside this branch. "
+                "Provide instructions for what should happen when the process "
+                "produces output or exits (e.g. 'if it fails, fix it')."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "description": "Shell command to execute",
+                    },
+                    "instructions": {
+                        "type": "string",
+                        "description": (
+                            "NL instructions for hooks "
+                            "(e.g. 'stop if errors appear')"
+                        ),
+                    },
+                },
+                "required": ["command"],
+            },
+            handler=run_concurrent,
+        )
+    )
+
+    registry.register(
+        ToolDefinition(
+            name="run_background",
+            description=(
+                "Start a long-running background process that outlives this branch. "
+                "Hooks spawn new branches to react to process events. "
+                "Provide instructions for what should happen when the process "
+                "produces output or exits."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "description": "Shell command to execute",
+                    },
+                    "instructions": {
+                        "type": "string",
+                        "description": (
+                            "NL instructions for hooks "
+                            "(e.g. 'notify me when it finishes')"
+                        ),
+                    },
+                    "model": {
+                        "type": "string",
+                        "description": (
+                            "Model for hook-spawned branches "
+                            "(default: agent's model)"
+                        ),
+                    },
+                },
+                "required": ["command"],
+            },
+            handler=run_background,
+        )
+    )
+
     # -- Git status tool -------------------------------------------------------
 
     from chorus.sub_agents.tasks.git_status import git_status_execute

@@ -36,6 +36,7 @@ if TYPE_CHECKING:
 _CONTEXT_INJECTED_PARAMS = frozenset({
     "workspace", "profile", "agent_name", "chorus_home",
     "is_admin", "db", "host_execution",
+    "process_manager", "branch_id",
 })
 
 logger = logging.getLogger("chorus.llm.tool_loop")
@@ -70,6 +71,8 @@ _TOOL_TO_CATEGORY: dict[str, str] = {
     "list_models": "info",
     "web_search": "web_search",
     "claude_code": "claude_code",
+    "run_concurrent": "run_concurrent",
+    "run_background": "run_background",
 }
 
 
@@ -107,6 +110,8 @@ def _build_action_string(tool_name: str, arguments: dict[str, Any]) -> str:
             detail = sub
     elif category == "claude_code":
         detail = arguments.get("task", "")[:100]
+    elif category in ("run_concurrent", "run_background"):
+        detail = arguments.get("command", str(arguments))
     elif category == "web_search":
         detail = "enabled"
     else:
@@ -202,6 +207,8 @@ class ToolExecutionContext:
     is_admin: bool = False
     db: Any = None
     host_execution: bool = False
+    process_manager: Any = None
+    branch_id: int | None = None
 
 
 @dataclass
@@ -336,6 +343,10 @@ async def _execute_tool(
         kwargs["db"] = ctx.db
     if "host_execution" in sig.parameters and "host_execution" not in arguments:
         kwargs["host_execution"] = ctx.host_execution
+    if "process_manager" in sig.parameters and "process_manager" not in arguments:
+        kwargs["process_manager"] = ctx.process_manager
+    if "branch_id" in sig.parameters and "branch_id" not in arguments:
+        kwargs["branch_id"] = ctx.branch_id
 
     result = await tool.handler(**kwargs)
 

@@ -96,6 +96,28 @@ CREATE TABLE IF NOT EXISTS branches (
 
 CREATE INDEX IF NOT EXISTS idx_branches_agent
     ON branches(agent_name, branch_id);
+
+CREATE TABLE IF NOT EXISTS processes (
+    pid INTEGER PRIMARY KEY,
+    command TEXT NOT NULL,
+    working_directory TEXT NOT NULL,
+    agent_name TEXT NOT NULL,
+    started_at TEXT NOT NULL,
+    process_type TEXT NOT NULL,
+    spawned_by_branch INTEGER,
+    stdout_log TEXT,
+    stderr_log TEXT,
+    status TEXT NOT NULL DEFAULT 'running',
+    exit_code INTEGER,
+    callbacks_json TEXT,
+    context_json TEXT,
+    model_for_hooks TEXT,
+    hook_recursion_depth INTEGER DEFAULT 0,
+    discord_message_id INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS idx_processes_agent
+    ON processes(agent_name);
 """
 
 
@@ -633,3 +655,113 @@ class Database:
             }
             for row in rows
         ]
+
+    # ── Processes ─────────────────────────────────────────────────────────
+
+    async def insert_process(
+        self,
+        pid: int,
+        command: str,
+        working_directory: str,
+        agent_name: str,
+        started_at: str,
+        process_type: str,
+        spawned_by_branch: int | None = None,
+        stdout_log: str | None = None,
+        stderr_log: str | None = None,
+        status: str = "running",
+        callbacks_json: str | None = None,
+        context_json: str | None = None,
+        model_for_hooks: str | None = None,
+        hook_recursion_depth: int = 0,
+        discord_message_id: int | None = None,
+    ) -> None:
+        """Insert a new process record."""
+        await self.connection.execute(
+            "INSERT INTO processes "
+            "(pid, command, working_directory, agent_name, started_at, process_type, "
+            "spawned_by_branch, stdout_log, stderr_log, status, callbacks_json, "
+            "context_json, model_for_hooks, hook_recursion_depth, discord_message_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                pid, command, working_directory, agent_name, started_at,
+                process_type, spawned_by_branch, stdout_log, stderr_log, status,
+                callbacks_json, context_json, model_for_hooks,
+                hook_recursion_depth, discord_message_id,
+            ),
+        )
+        await self.connection.commit()
+        logger.info("Inserted process pid=%d for agent %s", pid, agent_name)
+
+    async def update_process_status(
+        self, pid: int, status: str, exit_code: int | None
+    ) -> None:
+        """Update the status and exit_code for a process."""
+        await self.connection.execute(
+            "UPDATE processes SET status = ?, exit_code = ? WHERE pid = ?",
+            (status, exit_code, pid),
+        )
+        await self.connection.commit()
+
+    async def get_process(self, pid: int) -> dict[str, Any] | None:
+        """Fetch a single process by PID."""
+        async with self.connection.execute(
+            "SELECT pid, command, working_directory, agent_name, started_at, "
+            "process_type, spawned_by_branch, stdout_log, stderr_log, status, "
+            "exit_code, callbacks_json, context_json, model_for_hooks, "
+            "hook_recursion_depth, discord_message_id "
+            "FROM processes WHERE pid = ?",
+            (pid,),
+        ) as cursor:
+            row = await cursor.fetchone()
+        if row is None:
+            return None
+        return self._row_to_process(row)
+
+    async def list_processes(
+        self, agent_name: str | None = None
+    ) -> list[dict[str, Any]]:
+        """List processes, optionally filtered by agent."""
+        if agent_name is not None:
+            query = (
+                "SELECT pid, command, working_directory, agent_name, started_at, "
+                "process_type, spawned_by_branch, stdout_log, stderr_log, status, "
+                "exit_code, callbacks_json, context_json, model_for_hooks, "
+                "hook_recursion_depth, discord_message_id "
+                "FROM processes WHERE agent_name = ? ORDER BY started_at DESC"
+            )
+            params: tuple[Any, ...] = (agent_name,)
+        else:
+            query = (
+                "SELECT pid, command, working_directory, agent_name, started_at, "
+                "process_type, spawned_by_branch, stdout_log, stderr_log, status, "
+                "exit_code, callbacks_json, context_json, model_for_hooks, "
+                "hook_recursion_depth, discord_message_id "
+                "FROM processes ORDER BY started_at DESC"
+            )
+            params = ()
+        async with self.connection.execute(query, params) as cursor:
+            rows = await cursor.fetchall()
+        return [self._row_to_process(row) for row in rows]
+
+    @staticmethod
+    def _row_to_process(row: Any) -> dict[str, Any]:
+        """Convert a processes table row tuple to a dict."""
+        return {
+            "pid": row[0],
+            "command": row[1],
+            "working_directory": row[2],
+            "agent_name": row[3],
+            "started_at": row[4],
+            "process_type": row[5],
+            "spawned_by_branch": row[6],
+            "stdout_log": row[7],
+            "stderr_log": row[8],
+            "status": row[9],
+            "exit_code": row[10],
+            "callbacks_json": row[11],
+            "context_json": row[12],
+            "model_for_hooks": row[13],
+            "hook_recursion_depth": row[14],
+            "discord_message_id": row[15],
+        }

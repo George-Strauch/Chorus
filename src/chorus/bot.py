@@ -31,6 +31,7 @@ from chorus.llm.tool_loop import (
 )
 from chorus.permissions.ask_ui import ask_user_permission
 from chorus.permissions.engine import get_preset
+from chorus.process.manager import ProcessManager
 from chorus.storage.db import Database
 from chorus.tools.registry import create_default_registry
 from chorus.ui.status import BotPresenceManager, LiveStatusView
@@ -57,6 +58,7 @@ class ChorusBot(commands.Bot):
         self._test_channel: discord.TextChannel | None = None
         self._presence_manager: BotPresenceManager | None = None
         self._discovery_task: asyncio.Task[None] | None = None
+        self._process_manager: ProcessManager | None = None
 
         intents = discord.Intents.default()
         intents.guilds = True
@@ -88,6 +90,14 @@ class ChorusBot(commands.Bot):
         self.agent_manager = AgentManager(
             directory, self.db, global_config=self.global_config, bot_config=self.config
         )
+
+        # Initialize process manager
+        self._process_manager = ProcessManager(
+            chorus_home=self.config.chorus_home,
+            db=self.db,
+            host_execution=self.config.host_execution,
+        )
+        await self._process_manager.recover_on_startup()
 
         # Auto-discover and load all command cogs
         for module_info in pkgutil.iter_modules(chorus.commands.__path__):
@@ -155,11 +165,14 @@ class ChorusBot(commands.Bot):
             logger.exception("Startup model discovery failed")
 
     async def close(self) -> None:
-        """Kill all threads, cancel discovery, shut down database, and disconnect."""
+        """Kill all threads/processes, cancel discovery, shut down database, and disconnect."""
         if self._discovery_task is not None and not self._discovery_task.done():
             self._discovery_task.cancel()
         for tm in self._thread_managers.values():
             await tm.kill_all()
+        if self._process_manager is not None:
+            for agent_name in list({p.agent_name for p in self._process_manager.list_processes()}):
+                await self._process_manager.kill_all_for_agent(agent_name)
         if hasattr(self, "db"):
             await self.db.close()
         await super().close()
@@ -420,6 +433,8 @@ class ChorusBot(commands.Bot):
                 is_admin=is_admin,
                 db=self.db,
                 host_execution=self.config.host_execution,
+                process_manager=self._process_manager,
+                branch_id=target_thread.id,
             )
 
             # Get previous branch summary for context
@@ -449,6 +464,7 @@ class ChorusBot(commands.Bot):
                 previous_branch_summary=previous_summary,
                 previous_branch_id=previous_branch_id,
                 scope_path=self.config.scope_path,
+                process_manager=self._process_manager,
             )
 
             registry = create_default_registry()

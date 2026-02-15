@@ -361,6 +361,32 @@ class ContextManager:
         )
 
 
+# ── Process status helper ────────────────────────────────────────────────
+
+
+def _build_process_status(process_manager: Any, agent_name: str) -> str:
+    """Format running process info for system prompt injection."""
+    from chorus.process.models import ProcessStatus
+
+    processes = process_manager.list_processes(agent_name)
+    running = [p for p in processes if p.status == ProcessStatus.RUNNING]
+    if not running:
+        return ""
+    lines = ["Running processes:"]
+    for p in running:
+        cmd_preview = p.command[:80] + ("..." if len(p.command) > 80 else "")
+        tail_preview = ""
+        if p.rolling_tail:
+            last = list(p.rolling_tail)[-1]
+            if len(last) > 100:
+                last = last[:100] + "..."
+            tail_preview = f" | last output: {last}"
+        lines.append(
+            f"  PID {p.pid}: `{cmd_preview}` ({p.process_type.value}){tail_preview}"
+        )
+    return "\n".join(lines)
+
+
 # ── Context assembly helper ─────────────────────────────────────────────
 
 
@@ -386,6 +412,7 @@ async def build_llm_context(
     previous_branch_summary: str | None = None,
     previous_branch_id: int | None = None,
     scope_path: Path | None = None,
+    process_manager: Any | None = None,
 ) -> list[dict[str, Any]]:
     """Assemble the full context for an LLM call.
 
@@ -460,6 +487,12 @@ async def build_llm_context(
     thread_status = build_thread_status(thread_manager, current_thread_id)
     if thread_status and thread_status != "No active threads.":
         messages.append({"role": "system", "content": thread_status})
+
+    # 6b. Process status
+    if process_manager is not None:
+        process_status = _build_process_status(process_manager, agent.name)
+        if process_status:
+            messages.append({"role": "system", "content": process_status})
 
     # 7. Rolling window messages — scoped to this branch
     window_msgs = await context_manager.get_context(thread_id=thread_id)

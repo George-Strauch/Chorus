@@ -83,6 +83,8 @@ class GlobalConfig:
     idle_timeout: int = 1800
     max_tool_loop_iterations: int = 40
     max_bash_timeout: int = 120
+    default_output_delay: float = 2.0
+    max_hook_recursion_depth: int = 3
 
     @classmethod
     def load(cls, path: Path) -> GlobalConfig:
@@ -95,6 +97,8 @@ class GlobalConfig:
                 idle_timeout=data.get("idle_timeout", 1800),
                 max_tool_loop_iterations=data.get("max_tool_loop_iterations", 40),
                 max_bash_timeout=data.get("max_bash_timeout", 120),
+                default_output_delay=data.get("default_output_delay", 2.0),
+                max_hook_recursion_depth=data.get("max_hook_recursion_depth", 3),
             )
         cfg = cls()
         cfg.save(path)

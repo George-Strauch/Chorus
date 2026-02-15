@@ -141,6 +141,8 @@ PRESETS: dict[str, PermissionProfile] = {
             r"tool:self_edit:(system_prompt|permissions|model).*",
             r"tool:web_search:.*",
             r"tool:claude_code:.*",
+            r"tool:run_concurrent:.*",
+            r"tool:run_background:.*",
         ],
     ),
     "guarded": PermissionProfile(
