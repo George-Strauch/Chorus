@@ -7,6 +7,7 @@ import contextlib
 import json
 import logging
 import os
+import shutil
 from collections import deque
 from datetime import UTC, datetime
 from pathlib import Path
@@ -26,7 +27,33 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("chorus.process.manager")
 
+# Cache stdbuf availability at import time (it's a static binary path)
+_STDBUF_PATH: str | None = shutil.which("stdbuf")
+
 _DEFAULT_SIGTERM_GRACE = 5.0
+
+
+def _wrap_with_stdbuf(command: str) -> str:
+    """Wrap *command* with ``stdbuf -oL`` to force line-buffered stdout.
+
+    Most programs use full buffering (~4-8KB) when stdout is a pipe
+    (not a TTY). This means output only reaches our OutputMonitor when
+    the buffer fills or the process exits — breaking ON_OUTPUT_MATCH
+    hooks that need to see lines in real time.
+
+    ``stdbuf -oL`` uses LD_PRELOAD to override libc's buffering and
+    force line-buffering on stdout. This works for most dynamically
+    linked programs. It does NOT work for:
+    - Statically linked binaries (Go, Rust, musl-linked)
+    - Programs that explicitly call setvbuf() after startup
+    - setuid binaries (LD_PRELOAD is ignored)
+
+    For Python subprocesses, PYTHONUNBUFFERED=1 (set in _sanitized_env)
+    is more reliable since it bypasses libc entirely.
+    """
+    if _STDBUF_PATH is None:
+        return command
+    return f"stdbuf -oL {command}"
 
 
 class ProcessManager:
@@ -90,8 +117,12 @@ class ProcessManager:
         """
         env = _sanitized_env(workspace, env_overrides, host_execution=self._host_execution)
 
+        # Wrap with stdbuf to force line-buffered stdout so hooks see
+        # output in real time instead of only at process exit.
+        wrapped_command = _wrap_with_stdbuf(command)
+
         process = await asyncio.create_subprocess_shell(
-            command,
+            wrapped_command,
             cwd=workspace,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,

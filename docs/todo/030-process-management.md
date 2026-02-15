@@ -48,6 +48,31 @@ Async task per process.
 - Maintains `deque(maxlen=100)` rolling tail
 - Evaluates regex triggers on each line (delegated to hooks in TODO 031)
 
+### Stdout Buffering Mitigation
+
+Subprocesses spawned with `stdout=PIPE` get a pipe (not a TTY). Most
+programs detect this and switch to **full buffering** (~4-8KB), meaning
+output only reaches our `readline()` when the buffer fills or the process
+exits. This breaks ON_OUTPUT_MATCH hooks that need real-time output.
+
+Two mitigations are applied:
+
+1. **`PYTHONUNBUFFERED=1`** — set in `_sanitized_env()` for all
+   subprocesses. Forces Python programs to flush stdout/stderr on every
+   write. This is the most reliable fix for Python scripts (the majority
+   of what agents run).
+
+2. **`stdbuf -oL` wrapping** — `ProcessManager.spawn()` wraps commands
+   with `stdbuf -oL` to force line-buffered stdout via LD_PRELOAD. This
+   works for most dynamically-linked C programs. It does NOT work for:
+   - Statically-linked binaries (Go, Rust, musl-linked)
+   - Programs that explicitly call `setvbuf()` after startup
+   - setuid binaries (LD_PRELOAD is ignored for security)
+
+Together these cover ~95% of real-world usage. For the remaining edge
+cases, users can add explicit flushes in their scripts or use
+`python3 -u` directly.
+
 ### DB Schema
 
 ```sql

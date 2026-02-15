@@ -95,12 +95,20 @@ def _sanitized_env(
     When *host_execution* is True: the full host environment is passed
     through and ``HOME`` is NOT jailed. This gives the subprocess access
     to the host's full development environment (compilers, tools, etc.).
+
+    Always sets ``PYTHONUNBUFFERED=1`` so Python subprocesses flush
+    stdout/stderr immediately rather than buffering until exit.
     """
     if host_execution:
         env = dict(os.environ)
     else:
         env = {k: v for k, v in os.environ.items() if k in ALLOWED_ENV_VARS}
         env["HOME"] = str(workspace)
+    # Force Python subprocesses to flush stdout/stderr line-by-line.
+    # Without this, piped stdout is fully buffered (~4-8KB) and output
+    # only arrives when the buffer fills or the process exits — breaking
+    # ON_OUTPUT_MATCH hooks that need to see lines in real time.
+    env["PYTHONUNBUFFERED"] = "1"
     if overrides:
         env.update(overrides)
     return env

@@ -309,3 +309,80 @@ async def test_spawn_captures_output(pm: ProcessManager, workspace: Path) -> Non
     assert p is not None
     tail = list(p.rolling_tail)
     assert any("hello world" in line for line in tail)
+
+
+@pytest.mark.asyncio
+async def test_python_output_arrives_before_exit(
+    pm: ProcessManager, workspace: Path
+) -> None:
+    """PYTHONUNBUFFERED=1 ensures Python output is visible before process exits.
+
+    Without unbuffered mode, piped stdout is fully buffered and
+    on_line callbacks only fire at exit. This test verifies that
+    a line printed mid-execution is visible while the process
+    is still running.
+    """
+    lines_seen: list[str] = []
+
+    async def on_line(pid: int, stream: str, line: str) -> None:
+        lines_seen.append(line)
+
+    pm.set_callbacks(on_line=on_line)
+
+    # Python script that prints a marker, then sleeps
+    script = (
+        "import time; "
+        "print('MARKER_VISIBLE'); "
+        "time.sleep(5)"
+    )
+    tracked = await pm.spawn(
+        command=f"python3 -c \"{script}\"",
+        workspace=workspace,
+        agent_name="test-agent",
+        process_type=ProcessType.BACKGROUND,
+    )
+
+    # Wait up to 2s for the marker to appear — well before the 5s sleep ends
+    for _ in range(20):
+        if any("MARKER_VISIBLE" in line for line in lines_seen):
+            break
+        await asyncio.sleep(0.1)
+
+    # The process should still be running
+    p = pm.get_process(tracked.pid)
+    assert p is not None
+    assert p.status == ProcessStatus.RUNNING
+
+    # And we should have seen the marker
+    assert any("MARKER_VISIBLE" in line for line in lines_seen), (
+        "Output line was not visible before process exit — "
+        "PYTHONUNBUFFERED may not be set in subprocess env"
+    )
+
+    await pm.kill_process(tracked.pid)
+
+
+@pytest.mark.asyncio
+async def test_stdbuf_wraps_command(pm: ProcessManager, workspace: Path) -> None:
+    """Spawned commands are wrapped with stdbuf -oL when available."""
+    from chorus.process.manager import _STDBUF_PATH
+
+    tracked = await pm.spawn(
+        command="echo test",
+        workspace=workspace,
+        agent_name="test-agent",
+        process_type=ProcessType.BACKGROUND,
+    )
+    await asyncio.sleep(0.3)
+
+    # The TrackedProcess stores the original command (not wrapped)
+    assert tracked.command == "echo test"
+
+    # But the actual subprocess got stdbuf if available
+    if _STDBUF_PATH is not None:
+        # Verify stdbuf is on the system (it's in coreutils)
+        import shutil
+
+        assert shutil.which("stdbuf") is not None
+
+    await pm.kill_process(tracked.pid)

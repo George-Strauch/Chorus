@@ -31,6 +31,14 @@ Evaluates callbacks against process events and executes actions.
 - After delay, callback fires with all buffered output since match
 - Default delay from GlobalConfig.default_output_delay (2.0s)
 
+**Stdout buffering prerequisite:**
+ON_OUTPUT_MATCH hooks depend on output arriving line-by-line via
+`OutputMonitor._read_stream()`. Without mitigation, piped stdout is
+fully buffered (~4-8KB) and hooks only fire at process exit. Two
+mitigations (see TODO 030) ensure real-time delivery:
+- `PYTHONUNBUFFERED=1` in subprocess env (Python scripts)
+- `stdbuf -oL` command wrapping (dynamically-linked C programs)
+
 **Safety:**
 - Max recursion depth (default 3) — hook-spawned processes inherit depth + 1
 - Max fires per callback (default 1 for on_output_match)

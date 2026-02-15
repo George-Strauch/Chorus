@@ -218,6 +218,14 @@ class TestEnvironment:
         result = await bash_execute("echo $SCOPE_PATH", workspace_dir, ALLOW_ALL)
         assert result.stdout.strip() == ""
 
+    @pytest.mark.asyncio
+    async def test_bash_execute_env_sets_pythonunbuffered(
+        self, workspace_dir: Path, safe_env: None
+    ) -> None:
+        """PYTHONUNBUFFERED=1 is set so Python subprocesses flush immediately."""
+        result = await bash_execute("echo $PYTHONUNBUFFERED", workspace_dir, ALLOW_ALL)
+        assert result.stdout.strip() == "1"
+
 
 # ---------------------------------------------------------------------------
 # TestBlocklist
