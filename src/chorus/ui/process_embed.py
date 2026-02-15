@@ -14,8 +14,8 @@ from chorus.process.models import ProcessStatus
 
 logger = logging.getLogger("chorus.ui.process_embed")
 
-# Color mapping
-_COLORS = {
+# Color mapping — exported as STATUS_COLORS for use in process_commands
+STATUS_COLORS = {
     ProcessStatus.RUNNING: discord.Color.green(),
     ProcessStatus.EXITED: discord.Color.greyple(),
     ProcessStatus.KILLED: discord.Color.red(),
@@ -129,7 +129,7 @@ class ProcessStatusEmbed:
             )
 
         status = tracked.status
-        color = _COLORS.get(status, discord.Color.greyple())
+        color = STATUS_COLORS.get(status, discord.Color.greyple())
 
         # Override color for error exits
         if status == ProcessStatus.EXITED and tracked.exit_code != 0:

@@ -3,18 +3,156 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 import discord
 from discord import app_commands
 from discord.ext import commands
 
-from chorus.process.models import ExitFilter
+from chorus.process.models import (
+    ExitFilter,
+    ProcessCallback,
+    ProcessStatus,
+    TrackedProcess,
+    TriggerType,
+)
+from chorus.ui.process_embed import STATUS_COLORS
 
 if TYPE_CHECKING:
     from chorus.process.manager import ProcessManager
 
 logger = logging.getLogger("chorus.commands.process")
+
+# Status emoji mapping
+_STATUS_EMOJI = {
+    ProcessStatus.RUNNING: "\U0001f7e2",  # 🟢
+    ProcessStatus.EXITED: "\u26aa",  # ⚪
+    ProcessStatus.KILLED: "\U0001f534",  # 🔴
+    ProcessStatus.LOST: "\u26ab",  # ⚫
+}
+
+_MAX_EMBEDS = 10
+_MAX_COMMAND_CHARS = 3800
+_MAX_CONTEXT_CHARS = 1000
+
+
+def _discord_timestamp(iso_string: str) -> str:
+    """Convert an ISO 8601 timestamp to a Discord relative timestamp (<t:...:R>)."""
+    try:
+        dt = datetime.fromisoformat(iso_string)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return f"<t:{int(dt.timestamp())}:R>"
+    except (ValueError, OSError):
+        # Fallback to raw string if parsing fails
+        return iso_string[:19]
+
+
+def _safe_truncate(text: str, max_len: int) -> str:
+    """Truncate text to max_len, adding '...' if truncated."""
+    if len(text) <= max_len:
+        return text
+    return text[: max_len - 3] + "..."
+
+
+def _format_hook(cb: ProcessCallback) -> str:
+    """Format a single hook for display.
+
+    Active hooks: **trigger_desc** → action\\n  fires: N/M
+    Exhausted hooks: ~~trigger_desc → action~~ (exhausted)
+    """
+    # Build trigger description
+    trigger = cb.trigger
+    trigger_desc = f"**{trigger.type.value}**"
+    if trigger.exit_filter != ExitFilter.ANY:
+        trigger_desc += f"({trigger.exit_filter.value})"
+    if trigger.pattern:
+        trigger_desc += f" `{trigger.pattern}`"
+    if trigger.timeout_seconds is not None:
+        trigger_desc += f" {trigger.timeout_seconds}s"
+
+    action_str = cb.action.value
+    if cb.output_delay_seconds > 0:
+        action_str += f" (delay {cb.output_delay_seconds}s)"
+
+    if cb.exhausted:
+        # Strip markdown bold for strikethrough
+        plain_trigger = trigger_desc.replace("**", "")
+        return f"~~{plain_trigger} \u2192 {action_str}~~ (exhausted)"
+
+    line = f"{trigger_desc} \u2192 {action_str}"
+    line += f"\n\u2003fires: {cb.fire_count}/{cb.max_fires}"
+    return line
+
+
+def _process_color(p: TrackedProcess) -> discord.Color:
+    """Get the embed color for a process, with error-exit override."""
+    color = STATUS_COLORS.get(p.status, discord.Color.greyple())
+    if p.status == ProcessStatus.EXITED and p.exit_code is not None and p.exit_code != 0:
+        color = discord.Color.red()
+    return color
+
+
+def _build_process_embed(p: TrackedProcess) -> discord.Embed:
+    """Build a single embed for one process."""
+    emoji = _STATUS_EMOJI.get(p.status, "\u2753")
+    cmd_short = p.command
+    if len(cmd_short) > 50:
+        cmd_short = cmd_short[:47] + "..."
+    title = f"{emoji} PID {p.pid} \u2014 {cmd_short}"
+
+    # Full command in code block as description
+    cmd_display = _safe_truncate(p.command, _MAX_COMMAND_CHARS)
+    description = f"```\n{cmd_display}\n```"
+
+    embed = discord.Embed(
+        title=title,
+        description=description,
+        color=_process_color(p),
+    )
+
+    # Inline fields
+    embed.add_field(name="Type", value=p.process_type.value, inline=True)
+    embed.add_field(name="Started", value=_discord_timestamp(p.started_at), inline=True)
+
+    if p.exit_code is not None:
+        embed.add_field(name="Exit Code", value=str(p.exit_code), inline=True)
+
+    # Working directory
+    embed.add_field(name="Working Directory", value=f"`{p.working_directory}`", inline=False)
+
+    # Hooks
+    if p.callbacks:
+        hook_lines = [_format_hook(cb) for cb in p.callbacks]
+        hooks_text = "\n".join(hook_lines)
+        embed.add_field(name="Hooks", value=_safe_truncate(hooks_text, 1024), inline=False)
+
+    # Context
+    if p.context:
+        ctx_display = _safe_truncate(p.context, _MAX_CONTEXT_CHARS)
+        embed.add_field(name="Context", value=ctx_display, inline=False)
+
+    embed.set_footer(text=f"Agent: {p.agent_name}")
+    return embed
+
+
+def _build_overflow_embed(remaining: list[TrackedProcess]) -> discord.Embed:
+    """Build a compact summary embed for processes that don't fit."""
+    lines: list[str] = []
+    for p in remaining:
+        emoji = _STATUS_EMOJI.get(p.status, "\u2753")
+        cmd_short = p.command
+        if len(cmd_short) > 40:
+            cmd_short = cmd_short[:37] + "..."
+        exit_info = f" (exit {p.exit_code})" if p.exit_code is not None else ""
+        lines.append(f"{emoji} **PID {p.pid}** \u2014 `{cmd_short}` [{p.status.value}{exit_info}]")
+
+    return discord.Embed(
+        title=f"+ {len(remaining)} more process(es)",
+        description="\n".join(lines),
+        color=discord.Color.light_grey(),
+    )
 
 
 class ProcessCog(commands.Cog):
@@ -51,53 +189,19 @@ class ProcessCog(commands.Cog):
             )
             return
 
-        embed = discord.Embed(
-            title="Processes",
-            description=f"{len(processes)} process(es)",
-        )
-        for p in processes[:20]:  # Cap at 20
-            # Full command in code block (capped at embed field limit)
-            cmd_display = p.command
-            if len(cmd_display) > 900:
-                cmd_display = cmd_display[:900] + "..."
-            status = p.status.value
-            exit_info = f" (exit {p.exit_code})" if p.exit_code is not None else ""
+        embeds: list[discord.Embed] = []
 
-            lines = [
-                f"```\n{cmd_display}\n```",
-                f"Type: {p.process_type.value} | Status: {status}{exit_info}",
-                f"Started: {p.started_at[:19]}",
-            ]
+        if len(processes) <= _MAX_EMBEDS:
+            # All fit as full embeds
+            for p in processes:
+                embeds.append(_build_process_embed(p))
+        else:
+            # First 9 as full embeds, 10th is overflow summary
+            for p in processes[: _MAX_EMBEDS - 1]:
+                embeds.append(_build_process_embed(p))
+            embeds.append(_build_overflow_embed(processes[_MAX_EMBEDS - 1 :]))
 
-            # Show callbacks
-            active_cbs = [cb for cb in p.callbacks if not cb.exhausted]
-            if active_cbs:
-                cb_lines: list[str] = []
-                for cb in active_cbs:
-                    trigger_desc = cb.trigger.type.value
-                    if cb.trigger.exit_filter != ExitFilter.ANY:
-                        trigger_desc += f"({cb.trigger.exit_filter.value})"
-                    if cb.trigger.pattern:
-                        trigger_desc += f" `{cb.trigger.pattern}`"
-                    if cb.trigger.timeout_seconds is not None:
-                        trigger_desc += f" {cb.trigger.timeout_seconds}s"
-                    cb_lines.append(f"{trigger_desc} \u2192 {cb.action.value}")
-                lines.append("Hooks: " + "; ".join(cb_lines))
-
-            # Show context preview
-            if p.context:
-                ctx_preview = p.context[:100]
-                if len(p.context) > 100:
-                    ctx_preview += "..."
-                lines.append(f"Context: {ctx_preview}")
-
-            value = "\n".join(lines)
-            # Discord embed field value max is 1024 chars
-            if len(value) > 1024:
-                value = value[:1021] + "..."
-            embed.add_field(name=f"PID {p.pid}", value=value, inline=False)
-
-        await interaction.response.send_message(embed=embed)
+        await interaction.response.send_message(embeds=embeds)
 
     @process_group.command(name="kill", description="Kill a running process")
     @app_commands.describe(pid="Process ID to kill")

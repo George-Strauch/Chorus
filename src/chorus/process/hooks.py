@@ -152,8 +152,18 @@ class HookDispatcher:
             if not pattern.search(line):
                 continue
 
-            # Matched! Apply output delay if configured
-            delay = cb.output_delay_seconds or self._default_output_delay
+            # Matched!
+            logger.debug(
+                "Output match for pid %d: pattern=%r matched line=%r",
+                pid, cb.trigger.pattern, line,
+            )
+            # Use explicit delay if set, otherwise fall back to default.
+            # Note: ``or`` would incorrectly treat 0.0 as falsy.
+            delay = (
+                cb.output_delay_seconds
+                if cb.output_delay_seconds
+                else self._default_output_delay
+            )
             if delay > 0:
                 await self._delayed_fire(pid, cb, line, delay)
             else:
@@ -195,13 +205,19 @@ class HookDispatcher:
         self, pid: int, cb: ProcessCallback, trigger_line: str, delay: float
     ) -> None:
         """Wait for delay, accumulating output, then fire."""
-        # Cancel any existing delay for this callback
         key = id(cb)
+        logger.debug(
+            "Scheduling delayed fire for pid %d: delay=%.1fs trigger=%r",
+            pid, delay, trigger_line,
+        )
 
         async def _wait_and_fire() -> None:
             await asyncio.sleep(delay)
             tracked = self._pm.get_process(pid)
             if tracked is None:
+                logger.warning(
+                    "Delayed fire for pid %d: process not found (gone?)", pid,
+                )
                 return
             # Build context with accumulated output
             tail_lines = list(tracked.rolling_tail)

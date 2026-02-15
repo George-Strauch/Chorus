@@ -153,6 +153,19 @@ class ProcessManager:
             hook_recursion_depth=hook_recursion_depth,
         )
 
+        if callbacks and self._on_line_callback is None:
+            logger.warning(
+                "Spawning process with %d callback(s) but on_line_callback is None "
+                "(HookDispatcher not wired?) — hooks will NOT fire",
+                len(callbacks),
+            )
+
+        # Register tracked process BEFORE starting monitor so that
+        # _on_line / _on_exit callbacks can find it via get_process().
+        async with self._lock:
+            self._processes[pid] = tracked
+            self._subprocess_handles[pid] = process
+
         # Create and start monitor
         monitor = OutputMonitor(
             pid=pid,
@@ -168,16 +181,16 @@ class ProcessManager:
         tracked.stderr_log = monitor.stderr_log
 
         async with self._lock:
-            self._processes[pid] = tracked
             self._monitors[pid] = monitor
-            self._subprocess_handles[pid] = process
 
         # Persist to DB
         await self._persist_process(tracked)
 
         logger.info(
-            "Spawned %s process pid=%d cmd=%r for agent %s",
+            "Spawned %s process pid=%d cmd=%r for agent %s (%d callbacks, on_line=%s)",
             process_type.value, pid, command, agent_name,
+            len(callbacks or []),
+            "wired" if self._on_line_callback is not None else "NONE",
         )
 
         # Fire on_spawn callback (for timeout watchers etc.)
