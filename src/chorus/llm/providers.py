@@ -333,7 +333,7 @@ class AnthropicProvider:
         kwargs: dict[str, Any] = {
             "model": model or self._default_model,
             "messages": translated,
-            "max_tokens": 16384,
+            "max_tokens": 25000,
         }
         if system_prompt:
             kwargs["system"] = [
