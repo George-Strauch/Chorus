@@ -436,6 +436,7 @@ class ChorusBot(commands.Bot):
                 process_manager=self._process_manager,
                 branch_id=target_thread.id,
             )
+            # Note: on_tool_progress is set after status_view is created (below)
 
             # Get previous branch summary for context
             previous_summary: str | None = None
@@ -544,6 +545,41 @@ class ChorusBot(commands.Bot):
                 elif event.type == ToolLoopEventType.LLM_CALL_START:
                     updates["current_step"] = f"Thinking (call {event.iteration})"
                 await status_view.update(**updates)
+
+            # Build progress callback for claude_code tool
+            async def _on_tool_progress(info: dict) -> None:  # type: ignore[type-arg]
+                tool_name = info.get("tool_name", "")
+                tool_input = info.get("tool_input", {})
+                turn = info.get("turn", 0)
+
+                # Build a human-readable command string
+                cmd: str | None = None
+                if tool_name == "Bash":
+                    cmd = tool_input.get("command", "")
+                elif tool_name in ("Read", "Write", "Edit", "Glob"):
+                    path = tool_input.get("file_path") or tool_input.get("pattern") or ""
+                    cmd = f"{tool_name} {path}"
+                elif tool_name == "Grep":
+                    pattern = tool_input.get("pattern", "")
+                    cmd = f"Grep {pattern}"
+                elif tool_name == "Task":
+                    desc = tool_input.get("description") or tool_input.get("prompt", "")
+                    cmd = f"Task: {desc[:60]}"
+                else:
+                    cmd = f"{tool_name}"
+
+                if cmd:
+                    recent_commands.append(cmd)
+                    if len(recent_commands) > 5:
+                        recent_commands.pop(0)
+
+                await status_view.update(
+                    current_step=f"Running claude_code (turn {turn}: {tool_name})",
+                    recent_commands=list(recent_commands),
+                )
+
+            # Wire progress callback into context (defined after status_view)
+            ctx.on_tool_progress = _on_tool_progress
 
             # Build ask_callback for ASK permission prompts
             async def _ask_callback(tool_name: str, arguments: str) -> bool:

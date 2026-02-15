@@ -36,7 +36,7 @@ if TYPE_CHECKING:
 _CONTEXT_INJECTED_PARAMS = frozenset({
     "workspace", "profile", "agent_name", "chorus_home",
     "is_admin", "db", "host_execution",
-    "process_manager", "branch_id",
+    "process_manager", "branch_id", "on_tool_progress",
 })
 
 logger = logging.getLogger("chorus.llm.tool_loop")
@@ -209,6 +209,7 @@ class ToolExecutionContext:
     host_execution: bool = False
     process_manager: Any = None
     branch_id: int | None = None
+    on_tool_progress: Any = None  # Callable[[dict], Any] | None
 
 
 @dataclass
@@ -347,6 +348,8 @@ async def _execute_tool(
         kwargs["process_manager"] = ctx.process_manager
     if "branch_id" in sig.parameters and "branch_id" not in arguments:
         kwargs["branch_id"] = ctx.branch_id
+    if "on_tool_progress" in sig.parameters and "on_tool_progress" not in arguments:
+        kwargs["on_tool_progress"] = ctx.on_tool_progress
 
     result = await tool.handler(**kwargs)
 

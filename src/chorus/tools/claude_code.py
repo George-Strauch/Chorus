@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
     from chorus.permissions.engine import PermissionProfile
@@ -101,10 +102,18 @@ async def _run_sdk_query(
     max_turns: int | None = None,
     max_budget_usd: float | None = None,
     host_execution: bool = False,
+    on_progress: Callable[[dict[str, Any]], Any] | None = None,
 ) -> dict[str, Any]:
     """Run the Claude Agent SDK query() and collect results.
 
     Returns a dict with output, cost_usd, duration_ms, num_turns, session_id, is_error.
+
+    Parameters
+    ----------
+    on_progress:
+        Optional callback fired on each SDK message with progress info.
+        Receives a dict with keys like ``tool_name``, ``tool_input``,
+        ``turn``, ``text_preview``.
     """
     from claude_agent_sdk import (
         AgentDefinition,
@@ -161,13 +170,30 @@ async def _run_sdk_query(
         "session_id": None,
         "is_error": False,
     }
+    turn_count = 0
 
     async for message in query(prompt=task, options=options):
         # Collect text from assistant messages
         if isinstance(message, AssistantMessage):
+            turn_count += 1
             for block in message.content:
                 if hasattr(block, "text"):
                     output_parts.append(block.text)
+                # Fire progress for tool use blocks
+                if on_progress is not None and hasattr(block, "name"):
+                    # ToolUseBlock has name and input
+                    tool_input = getattr(block, "input", {}) or {}
+                    progress_info: dict[str, Any] = {
+                        "turn": turn_count,
+                        "tool_name": block.name,
+                        "tool_input": tool_input,
+                    }
+                    try:
+                        result = on_progress(progress_info)
+                        if asyncio.iscoroutine(result):
+                            await result
+                    except Exception:
+                        logger.debug("on_progress callback error", exc_info=True)
         elif isinstance(message, ResultMessage):
             result_info["duration_ms"] = message.duration_ms
             result_info["num_turns"] = message.num_turns
@@ -196,6 +222,7 @@ async def claude_code_execute(
     timeout: float = 600,
     model: str | None = None,
     host_execution: bool = False,
+    on_tool_progress: Callable[[dict[str, Any]], Any] | None = None,
 ) -> ClaudeCodeResult:
     """Execute a coding task via Claude Code SDK.
 
@@ -249,6 +276,7 @@ async def claude_code_execute(
                 max_turns=max_turns,
                 max_budget_usd=max_budget_usd,
                 host_execution=host_execution,
+                on_progress=on_tool_progress,
             ),
             timeout=timeout,
         )
