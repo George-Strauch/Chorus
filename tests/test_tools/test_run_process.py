@@ -260,6 +260,74 @@ class TestRunBackground:
         mock_process_manager.spawn.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_working_directory_used(
+        self, workspace_dir: Any, mock_process_manager: AsyncMock
+    ) -> None:
+        """working_directory param overrides workspace for spawn."""
+        subdir = workspace_dir / "subproject"
+        subdir.mkdir()
+
+        with patch(
+            "chorus.tools.run_process.build_callbacks_from_instructions",
+            new_callable=AsyncMock,
+            return_value=[],
+        ):
+            await run_background(
+                command="make build",
+                instructions="",
+                working_directory=str(subdir),
+                workspace=workspace_dir,
+                profile=ALLOW_ALL,
+                agent_name="test-agent",
+                process_manager=mock_process_manager,
+            )
+
+        call_kwargs = mock_process_manager.spawn.call_args[1]
+        assert str(call_kwargs["workspace"]) == str(subdir.resolve())
+
+    @pytest.mark.asyncio
+    async def test_working_directory_relative(
+        self, workspace_dir: Any, mock_process_manager: AsyncMock
+    ) -> None:
+        """Relative working_directory is resolved against workspace."""
+        subdir = workspace_dir / "src"
+        subdir.mkdir()
+
+        with patch(
+            "chorus.tools.run_process.build_callbacks_from_instructions",
+            new_callable=AsyncMock,
+            return_value=[],
+        ):
+            await run_concurrent(
+                command="echo test",
+                working_directory="src",
+                workspace=workspace_dir,
+                profile=ALLOW_ALL,
+                agent_name="test-agent",
+                process_manager=mock_process_manager,
+            )
+
+        call_kwargs = mock_process_manager.spawn.call_args[1]
+        assert str(call_kwargs["workspace"]) == str(subdir.resolve())
+
+    @pytest.mark.asyncio
+    async def test_working_directory_traversal_blocked(
+        self, workspace_dir: Any, mock_process_manager: AsyncMock
+    ) -> None:
+        """Path traversal in working_directory is blocked."""
+        result = await run_concurrent(
+            command="echo test",
+            working_directory="/etc",
+            workspace=workspace_dir,
+            profile=ALLOW_ALL,
+            agent_name="test-agent",
+            process_manager=mock_process_manager,
+        )
+
+        assert "error" in result
+        mock_process_manager.spawn.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_instructions_passed_as_context(
         self, workspace_dir: Any, mock_process_manager: AsyncMock
     ) -> None:

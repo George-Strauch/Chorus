@@ -371,11 +371,109 @@ class TestSafety:
         call_kwargs = mock_pm.set_callbacks.call_args[1]
         assert call_kwargs["on_line"] is not None
         assert call_kwargs["on_exit"] is not None
+        assert call_kwargs["on_spawn"] is not None
 
 
 # ---------------------------------------------------------------------------
 # ON_TIMEOUT triggers
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# NOTIFY_CHANNEL action
+# ---------------------------------------------------------------------------
+
+
+class TestNotifyChannelAction:
+    @pytest.mark.asyncio
+    async def test_notify_callback_called(
+        self, mock_pm: MagicMock
+    ) -> None:
+        """NOTIFY_CHANNEL calls the notify callback with correct args."""
+        notify_cb = AsyncMock()
+        dispatcher = HookDispatcher(
+            process_manager=mock_pm,
+            notify_callback=notify_cb,
+            default_output_delay=0.0,
+        )
+        cb = ProcessCallback(
+            trigger=HookTrigger(type=TriggerType.ON_EXIT),
+            action=CallbackAction.NOTIFY_CHANNEL,
+            context_message="Process done",
+        )
+        tracked = _make_tracked(callbacks=[cb])
+        mock_pm.get_process.return_value = tracked
+
+        await dispatcher._on_exit(100, 0)
+        notify_cb.assert_awaited_once()
+        call_args = notify_cb.call_args[0]
+        assert call_args[0] == "test-agent"
+        assert "Process done" in call_args[1]
+        assert call_args[2] is tracked
+
+    @pytest.mark.asyncio
+    async def test_notify_no_callback_is_noop(
+        self, mock_pm: MagicMock
+    ) -> None:
+        """NOTIFY_CHANNEL is a no-op when no notify callback is configured."""
+        dispatcher = HookDispatcher(
+            process_manager=mock_pm,
+            notify_callback=None,
+            default_output_delay=0.0,
+        )
+        cb = ProcessCallback(
+            trigger=HookTrigger(type=TriggerType.ON_EXIT),
+            action=CallbackAction.NOTIFY_CHANNEL,
+        )
+        tracked = _make_tracked(callbacks=[cb])
+        mock_pm.get_process.return_value = tracked
+
+        # Should not raise
+        await dispatcher._on_exit(100, 0)
+        assert cb.fire_count == 1
+
+
+# ---------------------------------------------------------------------------
+# on_spawn
+# ---------------------------------------------------------------------------
+
+
+class TestOnSpawn:
+    def test_on_spawn_starts_timeout_watchers(
+        self, mock_pm: MagicMock
+    ) -> None:
+        """_on_spawn calls start_timeout_watchers."""
+        dispatcher = HookDispatcher(
+            process_manager=mock_pm,
+            default_output_delay=0.0,
+        )
+        # No callbacks to watch, so just verify it doesn't error
+        mock_pm.get_process.return_value = _make_tracked(callbacks=[])
+        dispatcher._on_spawn(100)
+        mock_pm.get_process.assert_called_with(100)
+
+    @pytest.mark.asyncio
+    async def test_on_spawn_starts_timeout_task(
+        self, mock_pm: MagicMock
+    ) -> None:
+        """_on_spawn starts timeout watchers for timeout callbacks."""
+        cb = ProcessCallback(
+            trigger=HookTrigger(type=TriggerType.ON_TIMEOUT, timeout_seconds=0.1),
+            action=CallbackAction.STOP_PROCESS,
+        )
+        tracked = _make_tracked(callbacks=[cb])
+        mock_pm.get_process.return_value = tracked
+
+        dispatcher = HookDispatcher(
+            process_manager=mock_pm,
+            default_output_delay=0.0,
+        )
+        dispatcher._on_spawn(100)
+
+        # Wait for the timeout to fire
+        await asyncio.sleep(0.2)
+        assert cb.fire_count == 1
+        mock_pm.kill_process.assert_awaited()
 
 
 class TestOnTimeoutTrigger:

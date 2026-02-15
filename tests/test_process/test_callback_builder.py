@@ -172,7 +172,7 @@ class TestBuildCallbacksFromInstructions:
             cbs = await build_callbacks_from_instructions("do something")
 
         assert len(cbs) == 1
-        assert cbs[0].action == CallbackAction.SPAWN_BRANCH
+        assert cbs[0].action == CallbackAction.NOTIFY_CHANNEL
 
     @pytest.mark.asyncio
     async def test_sub_agent_exception_returns_default(self) -> None:
@@ -184,4 +184,4 @@ class TestBuildCallbacksFromInstructions:
             cbs = await build_callbacks_from_instructions("do something")
 
         assert len(cbs) == 1
-        assert cbs[0].action == CallbackAction.SPAWN_BRANCH
+        assert cbs[0].action == CallbackAction.NOTIFY_CHANNEL

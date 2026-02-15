@@ -9,6 +9,8 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from chorus.process.models import ExitFilter
+
 if TYPE_CHECKING:
     from chorus.process.manager import ProcessManager
 
@@ -54,15 +56,45 @@ class ProcessCog(commands.Cog):
             description=f"{len(processes)} process(es)",
         )
         for p in processes[:20]:  # Cap at 20
-            cmd_preview = p.command[:60] + ("..." if len(p.command) > 60 else "")
+            # Full command in code block (capped at embed field limit)
+            cmd_display = p.command
+            if len(cmd_display) > 900:
+                cmd_display = cmd_display[:900] + "..."
             status = p.status.value
             exit_info = f" (exit {p.exit_code})" if p.exit_code is not None else ""
-            value = (
-                f"Command: `{cmd_preview}`\n"
-                f"Type: {p.process_type.value}\n"
-                f"Status: {status}{exit_info}\n"
-                f"Started: {p.started_at[:19]}"
-            )
+
+            lines = [
+                f"```\n{cmd_display}\n```",
+                f"Type: {p.process_type.value} | Status: {status}{exit_info}",
+                f"Started: {p.started_at[:19]}",
+            ]
+
+            # Show callbacks
+            active_cbs = [cb for cb in p.callbacks if not cb.exhausted]
+            if active_cbs:
+                cb_lines: list[str] = []
+                for cb in active_cbs:
+                    trigger_desc = cb.trigger.type.value
+                    if cb.trigger.exit_filter != ExitFilter.ANY:
+                        trigger_desc += f"({cb.trigger.exit_filter.value})"
+                    if cb.trigger.pattern:
+                        trigger_desc += f" `{cb.trigger.pattern}`"
+                    if cb.trigger.timeout_seconds is not None:
+                        trigger_desc += f" {cb.trigger.timeout_seconds}s"
+                    cb_lines.append(f"{trigger_desc} \u2192 {cb.action.value}")
+                lines.append("Hooks: " + "; ".join(cb_lines))
+
+            # Show context preview
+            if p.context:
+                ctx_preview = p.context[:100]
+                if len(p.context) > 100:
+                    ctx_preview += "..."
+                lines.append(f"Context: {ctx_preview}")
+
+            value = "\n".join(lines)
+            # Discord embed field value max is 1024 chars
+            if len(value) > 1024:
+                value = value[:1021] + "..."
             embed.add_field(name=f"PID {p.pid}", value=value, inline=False)
 
         await interaction.response.send_message(embed=embed)

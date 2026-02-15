@@ -572,6 +572,9 @@ def create_default_registry() -> ToolRegistry:
             name="run_concurrent",
             description=(
                 "Start a long-running process that runs alongside this branch. "
+                "Launch ONE process per independent script/command. Do NOT chain "
+                "multiple scripts with && — spawn separate processes for each. "
+                "Use working_directory to set where the command runs instead of cd. "
                 "Provide instructions for what should happen when the process "
                 "produces output or exits (e.g. 'if it fails, fix it')."
             ),
@@ -580,13 +583,23 @@ def create_default_registry() -> ToolRegistry:
                 "properties": {
                     "command": {
                         "type": "string",
-                        "description": "Shell command to execute",
+                        "description": (
+                            "Shell command to execute "
+                            "(one command only, no && chaining)"
+                        ),
                     },
                     "instructions": {
                         "type": "string",
                         "description": (
                             "NL instructions for hooks "
                             "(e.g. 'stop if errors appear')"
+                        ),
+                    },
+                    "working_directory": {
+                        "type": "string",
+                        "description": (
+                            "Directory to run the command in "
+                            "(default: agent workspace). Use instead of cd."
                         ),
                     },
                 },
@@ -601,6 +614,9 @@ def create_default_registry() -> ToolRegistry:
             name="run_background",
             description=(
                 "Start a long-running background process that outlives this branch. "
+                "Launch ONE process per independent script/command. Do NOT chain "
+                "multiple scripts with && — spawn separate processes for each. "
+                "Use working_directory to set where the command runs instead of cd. "
                 "Hooks spawn new branches to react to process events. "
                 "Provide instructions for what should happen when the process "
                 "produces output or exits."
@@ -610,7 +626,10 @@ def create_default_registry() -> ToolRegistry:
                 "properties": {
                     "command": {
                         "type": "string",
-                        "description": "Shell command to execute",
+                        "description": (
+                            "Shell command to execute "
+                            "(one command only, no && chaining)"
+                        ),
                     },
                     "instructions": {
                         "type": "string",
@@ -624,6 +643,13 @@ def create_default_registry() -> ToolRegistry:
                         "description": (
                             "Model for hook-spawned branches "
                             "(default: agent's model)"
+                        ),
+                    },
+                    "working_directory": {
+                        "type": "string",
+                        "description": (
+                            "Directory to run the command in "
+                            "(default: agent workspace). Use instead of cd."
                         ),
                     },
                 },

@@ -46,7 +46,7 @@ class BranchSpawner(Protocol):
 class HookDispatcher:
     """Evaluates process callbacks and dispatches actions.
 
-    Wired into ProcessManager's on_line/on_exit callbacks.
+    Wired into ProcessManager's on_line/on_exit/on_spawn callbacks.
 
     Parameters
     ----------
@@ -58,6 +58,8 @@ class HookDispatcher:
         Callback for STOP_BRANCH actions — ``(agent_name, branch_id) → None``.
     inject_callback:
         Callback for INJECT_CONTEXT actions — ``(agent_name, branch_id, message) → None``.
+    notify_callback:
+        Callback for NOTIFY_CHANNEL actions — ``(agent_name, context, tracked) → None``.
     default_output_delay:
         Default delay in seconds for output match callbacks.
     max_recursion_depth:
@@ -70,6 +72,7 @@ class HookDispatcher:
         branch_spawner: BranchSpawner | None = None,
         thread_kill_callback: Callable[..., Coroutine[Any, Any, None]] | None = None,
         inject_callback: Callable[..., Coroutine[Any, Any, None]] | None = None,
+        notify_callback: Callable[..., Coroutine[Any, Any, None]] | None = None,
         default_output_delay: float = 2.0,
         max_recursion_depth: int = 3,
     ) -> None:
@@ -77,6 +80,7 @@ class HookDispatcher:
         self._branch_spawner = branch_spawner
         self._thread_kill = thread_kill_callback
         self._inject = inject_callback
+        self._notify = notify_callback
         self._default_output_delay = default_output_delay
         self._max_recursion_depth = max_recursion_depth
         self._spawn_semaphore = asyncio.Semaphore(3)
@@ -88,7 +92,12 @@ class HookDispatcher:
         self._pm.set_callbacks(
             on_line=self._on_line,
             on_exit=self._on_exit,
+            on_spawn=self._on_spawn,
         )
+
+    def _on_spawn(self, pid: int) -> None:
+        """Called when a process is spawned — starts timeout watchers."""
+        self.start_timeout_watchers(pid)
 
     # ── Start/stop timeout watchers ─────────────────────────────────────
 
@@ -244,6 +253,10 @@ class HookDispatcher:
                     tracked.spawned_by_branch,
                     full_context,
                 )
+
+        elif action == CallbackAction.NOTIFY_CHANNEL:
+            if self._notify is not None:
+                await self._notify(tracked.agent_name, full_context, tracked)
 
         elif action == CallbackAction.SPAWN_BRANCH:
             if tracked.hook_recursion_depth >= self._max_recursion_depth:

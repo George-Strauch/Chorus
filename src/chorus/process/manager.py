@@ -55,18 +55,21 @@ class ProcessManager:
         self._monitors: dict[int, OutputMonitor] = {}
         self._subprocess_handles: dict[int, asyncio.subprocess.Process] = {}
         self._lock = asyncio.Lock()
-        # Hook dispatcher set externally by TODO 031
+        # Hook callbacks, wired by HookDispatcher
         self._on_line_callback: Any = None
         self._on_exit_callback: Any = None
+        self._on_spawn_callback: Any = None
 
     def set_callbacks(
         self,
         on_line: Any = None,
         on_exit: Any = None,
+        on_spawn: Any = None,
     ) -> None:
-        """Set callbacks for hook integration (wired by HookDispatcher in TODO 031)."""
+        """Set callbacks for hook integration (wired by HookDispatcher)."""
         self._on_line_callback = on_line
         self._on_exit_callback = on_exit
+        self._on_spawn_callback = on_spawn
 
     async def spawn(
         self,
@@ -145,6 +148,14 @@ class ProcessManager:
             "Spawned %s process pid=%d cmd=%r for agent %s",
             process_type.value, pid, command, agent_name,
         )
+
+        # Fire on_spawn callback (for timeout watchers etc.)
+        if self._on_spawn_callback is not None:
+            try:
+                self._on_spawn_callback(pid)
+            except Exception:
+                logger.warning("on_spawn callback error for pid %d", pid, exc_info=True)
+
         return tracked
 
     def _make_exit_handler(self, pid: int) -> Any:

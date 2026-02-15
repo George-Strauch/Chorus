@@ -366,7 +366,7 @@ class ContextManager:
 
 def _build_process_status(process_manager: Any, agent_name: str) -> str:
     """Format running process info for system prompt injection."""
-    from chorus.process.models import ProcessStatus
+    from chorus.process.models import ExitFilter, ProcessStatus
 
     processes = process_manager.list_processes(agent_name)
     running = [p for p in processes if p.status == ProcessStatus.RUNNING]
@@ -374,7 +374,7 @@ def _build_process_status(process_manager: Any, agent_name: str) -> str:
         return ""
     lines = ["Running processes:"]
     for p in running:
-        cmd_preview = p.command[:80] + ("..." if len(p.command) > 80 else "")
+        cmd_preview = p.command[:120] + ("..." if len(p.command) > 120 else "")
         tail_preview = ""
         if p.rolling_tail:
             last = list(p.rolling_tail)[-1]
@@ -384,6 +384,21 @@ def _build_process_status(process_manager: Any, agent_name: str) -> str:
         lines.append(
             f"  PID {p.pid}: `{cmd_preview}` ({p.process_type.value}){tail_preview}"
         )
+        # Show active callbacks
+        active_cbs = [cb for cb in p.callbacks if not cb.exhausted]
+        for cb in active_cbs:
+            trigger_desc = cb.trigger.type.value
+            if cb.trigger.exit_filter != ExitFilter.ANY:
+                trigger_desc += f"({cb.trigger.exit_filter.value})"
+            if cb.trigger.pattern:
+                trigger_desc += f" `{cb.trigger.pattern}`"
+            lines.append(f"    hook: {trigger_desc} -> {cb.action.value}")
+        # Show context preview
+        if p.context:
+            ctx_preview = p.context[:100]
+            if len(p.context) > 100:
+                ctx_preview += "..."
+            lines.append(f"    context: {ctx_preview}")
     return "\n".join(lines)
 
 

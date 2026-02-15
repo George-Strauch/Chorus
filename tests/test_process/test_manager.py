@@ -273,6 +273,28 @@ async def test_recover_on_startup_marks_lost(
 
 
 @pytest.mark.asyncio
+async def test_on_spawn_callback_fired(pm: ProcessManager, workspace: Path) -> None:
+    """on_spawn callback is called after spawn() with the new PID."""
+    spawn_pids: list[int] = []
+
+    def on_spawn(pid: int) -> None:
+        spawn_pids.append(pid)
+
+    pm.set_callbacks(on_spawn=on_spawn)
+
+    tracked = await pm.spawn(
+        command="sleep 10",
+        workspace=workspace,
+        agent_name="test-agent",
+        process_type=ProcessType.BACKGROUND,
+    )
+    assert len(spawn_pids) == 1
+    assert spawn_pids[0] == tracked.pid
+
+    await pm.kill_process(tracked.pid)
+
+
+@pytest.mark.asyncio
 async def test_spawn_captures_output(pm: ProcessManager, workspace: Path) -> None:
     """Spawned processes capture output in rolling tail."""
     tracked = await pm.spawn(

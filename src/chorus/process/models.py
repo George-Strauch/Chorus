@@ -53,6 +53,7 @@ class CallbackAction(Enum):
     STOP_BRANCH = "stop_branch"
     INJECT_CONTEXT = "inject_context"
     SPAWN_BRANCH = "spawn_branch"
+    NOTIFY_CHANNEL = "notify_channel"
 
 
 # ---------------------------------------------------------------------------

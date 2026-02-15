@@ -8,7 +8,16 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from chorus.commands.process_commands import ProcessCog
-from chorus.process.models import ProcessStatus, ProcessType, TrackedProcess
+from chorus.process.models import (
+    CallbackAction,
+    ExitFilter,
+    HookTrigger,
+    ProcessCallback,
+    ProcessStatus,
+    ProcessType,
+    TrackedProcess,
+    TriggerType,
+)
 
 
 def _make_tracked(**overrides: object) -> TrackedProcess:
@@ -126,6 +135,42 @@ async def test_process_logs_empty(cog: ProcessCog, interaction: MagicMock) -> No
     cog.bot._process_manager.get_process.return_value = p
     await cog.process_logs.callback(cog, interaction, pid=12345, lines=20)
     assert "No output" in str(interaction.response.send_message.call_args)
+
+
+@pytest.mark.asyncio
+async def test_process_list_full_command_visible(
+    cog: ProcessCog, interaction: MagicMock
+) -> None:
+    """Process list shows full command, not truncated to 60 chars."""
+    long_cmd = "python3 /very/long/path/to/some/script.py --with-lots-of-arguments --verbose --debug"
+    p = _make_tracked(command=long_cmd)
+    cog.bot._process_manager.list_processes.return_value = [p]
+    await cog.process_list.callback(cog, interaction)
+    call_kwargs = interaction.response.send_message.call_args[1]
+    embed = call_kwargs["embed"]
+    field_value = embed.fields[0].value
+    # Full command should appear, not truncated to 60 chars
+    assert long_cmd in field_value
+
+
+@pytest.mark.asyncio
+async def test_process_list_shows_callbacks(
+    cog: ProcessCog, interaction: MagicMock
+) -> None:
+    """Process list shows active callbacks."""
+    cb = ProcessCallback(
+        trigger=HookTrigger(type=TriggerType.ON_EXIT, exit_filter=ExitFilter.FAILURE),
+        action=CallbackAction.NOTIFY_CHANNEL,
+    )
+    p = _make_tracked(callbacks=[cb], context="watch for failures")
+    cog.bot._process_manager.list_processes.return_value = [p]
+    await cog.process_list.callback(cog, interaction)
+    call_kwargs = interaction.response.send_message.call_args[1]
+    embed = call_kwargs["embed"]
+    field_value = embed.fields[0].value
+    assert "notify_channel" in field_value
+    assert "on_exit" in field_value
+    assert "watch for failures" in field_value
 
 
 @pytest.mark.asyncio

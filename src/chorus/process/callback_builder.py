@@ -26,13 +26,13 @@ Each callback has:
 - trigger: {"type": "on_exit"|"on_output_match"|"on_timeout", \
   "exit_filter": "any"|"success"|"failure", "pattern": "regex", \
   "timeout_seconds": number}
-- action: "stop_process"|"stop_branch"|"inject_context"|"spawn_branch"
+- action: "stop_process"|"stop_branch"|"inject_context"|"spawn_branch"|"notify_channel"
 - context_message: string (message to include when action fires)
 - output_delay_seconds: number (seconds to wait after match before firing, default 2.0)
 - max_fires: integer (how many times this callback can fire, default 1)
 
 Common patterns:
-- "notify me when it finishes" → on_exit(any) → spawn_branch
+- "notify me when it finishes" → on_exit(any) → notify_channel
 - "if it fails, fix it" → on_exit(failure) → spawn_branch with context "Fix it"
 - "stop if you see an error" → on_output_match("error|Error|ERROR") → stop_process
 - "if compilation succeeds, continue" → on_exit(success) → inject_context
@@ -43,7 +43,7 @@ Respond ONLY with a JSON array. No explanation.
 
 _DEFAULT_CALLBACK = ProcessCallback(
     trigger=HookTrigger(type=TriggerType.ON_EXIT, exit_filter=ExitFilter.ANY),
-    action=CallbackAction.SPAWN_BRANCH,
+    action=CallbackAction.NOTIFY_CHANNEL,
     context_message="Process completed",
     max_fires=1,
 )

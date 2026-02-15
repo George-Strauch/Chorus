@@ -47,6 +47,20 @@ class TestEnums:
         assert CallbackAction.STOP_BRANCH.value == "stop_branch"
         assert CallbackAction.INJECT_CONTEXT.value == "inject_context"
         assert CallbackAction.SPAWN_BRANCH.value == "spawn_branch"
+        assert CallbackAction.NOTIFY_CHANNEL.value == "notify_channel"
+
+    def test_notify_channel_roundtrip(self) -> None:
+        """NOTIFY_CHANNEL serializes and deserializes correctly."""
+        cb = ProcessCallback(
+            trigger=HookTrigger(type=TriggerType.ON_EXIT, exit_filter=ExitFilter.ANY),
+            action=CallbackAction.NOTIFY_CHANNEL,
+            context_message="Process completed",
+        )
+        d = cb.to_dict()
+        assert d["action"] == "notify_channel"
+        restored = ProcessCallback.from_dict(d)
+        assert restored.action == CallbackAction.NOTIFY_CHANNEL
+        assert restored.context_message == "Process completed"
 
 
 # ---------------------------------------------------------------------------

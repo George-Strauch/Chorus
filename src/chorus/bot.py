@@ -39,6 +39,8 @@ from chorus.ui.status import BotPresenceManager, LiveStatusView
 if TYPE_CHECKING:
     from chorus.agent.message_queue import ChannelMessageQueue
     from chorus.models import Agent
+    from chorus.process.hooks import HookDispatcher
+    from chorus.process.models import TrackedProcess
 
 logger = logging.getLogger("chorus.bot")
 
@@ -59,6 +61,7 @@ class ChorusBot(commands.Bot):
         self._presence_manager: BotPresenceManager | None = None
         self._discovery_task: asyncio.Task[None] | None = None
         self._process_manager: ProcessManager | None = None
+        self._hook_dispatcher: HookDispatcher | None = None
 
         intents = discord.Intents.default()
         intents.guilds = True
@@ -98,6 +101,17 @@ class ChorusBot(commands.Bot):
             host_execution=self.config.host_execution,
         )
         await self._process_manager.recover_on_startup()
+
+        # Wire HookDispatcher to process manager
+        from chorus.process.hooks import HookDispatcher as _HookDispatcher
+
+        self._hook_dispatcher = _HookDispatcher(
+            process_manager=self._process_manager,
+            notify_callback=self._hook_notify_channel,
+            thread_kill_callback=self._hook_kill_thread,
+            inject_callback=self._hook_inject_context,
+        )
+        self._hook_dispatcher.wire_to_manager()
 
         # Auto-discover and load all command cogs
         for module_info in pkgutil.iter_modules(chorus.commands.__path__):
@@ -266,6 +280,69 @@ class ChorusBot(commands.Bot):
             f"Latency: {self.latency * 1000:.0f}ms"
         )
         logger.info("Test channel ready: #%s (id=%d)", channel.name, channel.id)
+
+    # ── Hook dispatcher callbacks ────────────────────────────────────────
+
+    def _find_channel_for_agent(self, agent_name: str) -> discord.TextChannel | None:
+        """Reverse lookup: agent name → Discord channel."""
+        for channel_id, name in self._channel_to_agent.items():
+            if name == agent_name:
+                ch = self.get_channel(channel_id)
+                if isinstance(ch, discord.TextChannel):
+                    return ch
+        return None
+
+    async def _hook_notify_channel(
+        self, agent_name: str, context: str, tracked: TrackedProcess
+    ) -> None:
+        """Send a notification message to the agent's channel on process exit."""
+        channel = self._find_channel_for_agent(agent_name)
+        if channel is None:
+            logger.warning("No channel found for agent %s — skipping notification", agent_name)
+            return
+
+        # Build notification
+        exit_code = tracked.exit_code
+        status_emoji = "\u2705" if exit_code == 0 else "\u274c"
+        tail_lines = list(tracked.rolling_tail)[-5:]
+        tail_text = "\n".join(tail_lines) if tail_lines else "(no output)"
+        if len(tail_text) > 500:
+            tail_text = tail_text[-500:]
+
+        cmd_preview = tracked.command
+        if len(cmd_preview) > 200:
+            cmd_preview = cmd_preview[:200] + "..."
+
+        msg = (
+            f"{status_emoji} **Process exited** (PID {tracked.pid})\n"
+            f"**Command:** `{cmd_preview}`\n"
+            f"**Exit code:** {exit_code}\n"
+            f"```\n{tail_text}\n```"
+        )
+        try:
+            await channel.send(msg)
+        except Exception:
+            logger.warning(
+                "Failed to send hook notification for pid %d",
+                tracked.pid, exc_info=True,
+            )
+
+    async def _hook_kill_thread(self, agent_name: str, branch_id: int) -> None:
+        """Kill an execution thread from a hook callback."""
+        tm = self._thread_managers.get(agent_name)
+        if tm is not None:
+            await tm.kill_thread(branch_id)
+
+    async def _hook_inject_context(
+        self, agent_name: str, branch_id: int, message: str
+    ) -> None:
+        """Inject a context message into a thread's inject queue."""
+        tm = self._thread_managers.get(agent_name)
+        if tm is None:
+            return
+        thread = tm.get_thread(branch_id)
+        if thread is not None and thread.inject_queue is not None:
+            await thread.inject_queue.put({"role": "user", "content": message})
 
     async def on_message(self, message: discord.Message) -> None:
         """Route messages to agent threads or process as commands."""
