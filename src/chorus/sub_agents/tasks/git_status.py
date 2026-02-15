@@ -13,10 +13,7 @@ import asyncio
 import json
 import logging
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
-
-if TYPE_CHECKING:
-    pass
+from typing import Any
 
 logger = logging.getLogger("chorus.sub_agents.tasks.git_status")
 
@@ -84,7 +81,7 @@ async def _run_command(
 
         return exit_code, stdout, stderr
 
-    except asyncio.TimeoutError:
+    except TimeoutError:
         return -1, "", f"Command timed out after {timeout}s"
     except Exception as exc:
         return -1, "", f"{type(exc).__name__}: {exc}"
@@ -188,11 +185,20 @@ async def _filter_relevant_repos(
             if path.exists() and path.is_dir():
                 resolved.append(path)
 
-        return resolved if resolved else [r for r in all_repos if r == workspace or workspace in r.parents]
+        if resolved:
+            return resolved
+        return [
+            r for r in all_repos if r == workspace or workspace in r.parents
+        ]
 
     except (json.JSONDecodeError, TypeError, ValueError) as exc:
-        logger.warning("Failed to parse path discovery JSON: %s — using workspace fallback", exc)
-        return [r for r in all_repos if r == workspace or workspace in r.parents]
+        logger.warning(
+            "Failed to parse path discovery JSON: %s — using workspace fallback",
+            exc,
+        )
+        return [
+            r for r in all_repos if r == workspace or workspace in r.parents
+        ]
 
 
 # ---------------------------------------------------------------------------
@@ -370,8 +376,10 @@ def _format_git_report(results: dict[Path, dict[str, Any]]) -> str:
             # Parse diffstat to show concise summary
             change_lines = info["changes"].split("\n")
             if len(change_lines) > 1:
-                # First line is usually a summary like "2 files changed, 10 insertions(+)"
-                summary_line = change_lines[-1] if change_lines[-1].strip() else change_lines[-2] if len(change_lines) > 1 else ""
+                last = change_lines[-1]
+                summary_line = (
+                    last if last.strip() else change_lines[-2]
+                )
                 lines.append(f"   Changes: {summary_line}")
                 # Show individual file stats (up to 5 files)
                 for line in change_lines[:5]:
@@ -386,7 +394,10 @@ def _format_git_report(results: dict[Path, dict[str, Any]]) -> str:
         if info["staged"]:
             staged_lines = info["staged"].split("\n")
             if len(staged_lines) > 1:
-                summary_line = staged_lines[-1] if staged_lines[-1].strip() else staged_lines[-2] if len(staged_lines) > 1 else ""
+                last = staged_lines[-1]
+                summary_line = (
+                    last if last.strip() else staged_lines[-2]
+                )
                 lines.append(f"   Staged: {summary_line}")
             else:
                 lines.append("   Staged: (none)")
@@ -438,7 +449,7 @@ async def git_status_execute(
             _git_status_execute_impl(workspace, agent_name, chorus_home, host_execution),
             timeout=_OVERALL_TIMEOUT,
         )
-    except asyncio.TimeoutError:
+    except TimeoutError:
         return f"❌ Git status operation timed out after {_OVERALL_TIMEOUT}s"
     except Exception as exc:
         logger.exception("Git status execution failed")
@@ -478,7 +489,7 @@ async def _git_status_execute_impl(
     collected = await asyncio.gather(*tasks, return_exceptions=True)
 
     for repo, info in zip(relevant_repos, collected, strict=False):
-        if isinstance(info, Exception):
+        if isinstance(info, BaseException):
             failed[repo] = str(info)
             logger.warning("Failed to collect git info from %s: %s", repo, info)
         elif not info["success"]:

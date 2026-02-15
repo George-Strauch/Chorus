@@ -11,10 +11,9 @@ import asyncio
 import logging
 import os
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
-if TYPE_CHECKING:
-    from chorus.llm.providers import LLMProvider, Usage
+from chorus.llm.providers import AnthropicProvider, LLMProvider, OpenAIProvider, Usage
 
 logger = logging.getLogger("chorus.sub_agents.runner")
 
@@ -38,24 +37,30 @@ class SubAgentResult:
 # Model selection
 # ---------------------------------------------------------------------------
 
+# Provider preference order: Anthropic Haiku (cheapest), then OpenAI gpt-4o-mini.
+_CHEAP_MODELS: list[tuple[str, str, str]] = [
+    ("ANTHROPIC_API_KEY", "anthropic", "claude-haiku-4-5-20251001"),
+    ("OPENAI_API_KEY", "openai", "gpt-4o-mini"),
+]
 
-def pick_cheap_model() -> tuple[type[LLMProvider], str] | None:
+
+def pick_cheap_model() -> tuple[str, str, str] | None:
     """Select the cheapest available model based on environment API keys.
 
-    Returns ``(provider_class, model_id)`` or ``None`` if no keys are available.
-    Prefers Haiku over gpt-4o-mini for cost reasons.
+    Returns ``(env_var_name, provider_name, model_id)`` or ``None`` if no
+    keys are available.  Prefers Haiku over gpt-4o-mini for cost reasons.
     """
-    from chorus.llm.providers import AnthropicProvider, OpenAIProvider
-
-    anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
-    openai_key = os.environ.get("OPENAI_API_KEY", "").strip()
-
-    if anthropic_key:
-        return (AnthropicProvider, "claude-haiku-4-5-20251001")
-    if openai_key:
-        return (OpenAIProvider, "gpt-4o-mini")
-
+    for env_var, provider_name, model_id in _CHEAP_MODELS:
+        if os.environ.get(env_var, "").strip():
+            return env_var, provider_name, model_id
     return None
+
+
+def _create_provider(provider_name: str, api_key: str, model: str) -> LLMProvider:
+    """Instantiate a concrete provider by name."""
+    if provider_name == "anthropic":
+        return AnthropicProvider(api_key, model)
+    return OpenAIProvider(api_key, model)
 
 
 # ---------------------------------------------------------------------------
@@ -91,69 +96,37 @@ async def run_sub_agent(
         Contains success status, output text, model used, usage stats, and
         optional error message.
     """
-    from chorus.llm.providers import Usage
+    empty_usage = Usage(input_tokens=0, output_tokens=0)
 
     # Select model
-    if model_override:
-        # Try to use the override model
-        pick = pick_cheap_model()
-        if pick is None:
-            return SubAgentResult(
-                success=False,
-                output="",
-                model_used="",
-                usage=Usage(input_tokens=0, output_tokens=0),
-                error="No API keys available (ANTHROPIC_API_KEY or OPENAI_API_KEY)",
-            )
-        provider_class, default_model = pick
-        # Use the override if it matches the provider
-        if model_override.startswith("claude") and provider_class.__name__ == "AnthropicProvider":
-            model = model_override
-        elif model_override.startswith("gpt") and provider_class.__name__ == "OpenAIProvider":
-            model = model_override
-        else:
-            # Fallback to default if override doesn't match provider
-            model = default_model
-    else:
-        pick = pick_cheap_model()
-        if pick is None:
-            return SubAgentResult(
-                success=False,
-                output="",
-                model_used="",
-                usage=Usage(input_tokens=0, output_tokens=0),
-                error="No API keys available (ANTHROPIC_API_KEY or OPENAI_API_KEY)",
-            )
-        provider_class, model = pick
+    pick = pick_cheap_model()
+    if pick is None:
+        return SubAgentResult(
+            success=False,
+            output="",
+            model_used="",
+            usage=empty_usage,
+            error="No API keys available (ANTHROPIC_API_KEY or OPENAI_API_KEY)",
+        )
 
-    # Get API key
-    anthropic_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
-    openai_key = os.environ.get("OPENAI_API_KEY", "").strip()
+    env_var, provider_name, default_model = pick
+    api_key = os.environ.get(env_var, "").strip()
 
-    if provider_class.__name__ == "AnthropicProvider":
-        if not anthropic_key:
-            return SubAgentResult(
-                success=False,
-                output="",
-                model_used=model,
-                usage=Usage(input_tokens=0, output_tokens=0),
-                error="ANTHROPIC_API_KEY not available",
-            )
-        provider = provider_class(anthropic_key, model)
-    else:
-        if not openai_key:
-            return SubAgentResult(
-                success=False,
-                output="",
-                model_used=model,
-                usage=Usage(input_tokens=0, output_tokens=0),
-                error="OPENAI_API_KEY not available",
-            )
-        provider = provider_class(openai_key, model)
+    # Determine model to use — override only if it matches the provider
+    model = default_model
+    if model_override and (
+        (model_override.startswith("claude") and provider_name == "anthropic")
+        or (model_override.startswith("gpt") and provider_name == "openai")
+    ):
+        model = model_override
+
+    provider = _create_provider(provider_name, api_key, model)
 
     # Prepend system message if not already present
     working_messages = list(messages)
-    if system_prompt and (not working_messages or working_messages[0].get("role") != "system"):
+    if system_prompt and (
+        not working_messages or working_messages[0].get("role") != "system"
+    ):
         working_messages.insert(0, {"role": "system", "content": system_prompt})
 
     # Execute with timeout
@@ -180,12 +153,12 @@ async def run_sub_agent(
             usage=response.usage,
         )
 
-    except asyncio.TimeoutError:
+    except TimeoutError:
         return SubAgentResult(
             success=False,
             output="",
             model_used=model,
-            usage=Usage(input_tokens=0, output_tokens=0),
+            usage=empty_usage,
             error=f"Timeout after {timeout}s",
         )
     except Exception as exc:
@@ -194,6 +167,6 @@ async def run_sub_agent(
             success=False,
             output="",
             model_used=model,
-            usage=Usage(input_tokens=0, output_tokens=0),
+            usage=empty_usage,
             error=f"{type(exc).__name__}: {exc}",
         )

@@ -128,7 +128,7 @@ class TestRegistryContainsGitTools:
 
         registry = create_default_registry()
         git_tools = [t for t in registry.list_all() if t.name.startswith("git_")]
-        assert len(git_tools) == 8
+        assert len(git_tools) == 9
 
 
 class TestRegistryContainsInfoTools:
