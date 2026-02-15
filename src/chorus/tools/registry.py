@@ -38,7 +38,7 @@ class ToolRegistry:
 def create_default_registry() -> ToolRegistry:
     """Build a registry with the built-in tools pre-registered."""
     from chorus.tools.bash import bash_execute
-    from chorus.tools.file_ops import create_file, str_replace, view
+    from chorus.tools.file_ops import append_file, create_file, str_replace, view
     from chorus.tools.git import (
         git_branch,
         git_checkout,
@@ -74,6 +74,35 @@ def create_default_registry() -> ToolRegistry:
                 "required": ["path", "content"],
             },
             handler=create_file,
+        )
+    )
+
+    registry.register(
+        ToolDefinition(
+            name="append_file",
+            description=(
+                "Append content to an existing file, or create it if it doesn't exist. "
+                "Use this to build large files incrementally across multiple tool calls."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": (
+                            "File path — relative paths resolve within "
+                            "workspace, absolute paths (starting with /) "
+                            "used as-is"
+                        ),
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "Content to append (UTF-8)",
+                    },
+                },
+                "required": ["path", "content"],
+            },
+            handler=append_file,
         )
     )
 

@@ -49,6 +49,7 @@ logger = logging.getLogger("chorus.llm.tool_loop")
 # strings, but the registry uses specific names like "create_file", "view".
 _TOOL_TO_CATEGORY: dict[str, str] = {
     "create_file": "file",
+    "append_file": "file",
     "str_replace": "file",
     "view": "file",
     "bash": "bash",
@@ -496,8 +497,9 @@ async def run_tool_loop(
             truncation_msg = (
                 "Your response was cut off (max_tokens reached) while generating "
                 "tool call arguments. The tool call was NOT executed because the "
-                "arguments were incomplete. Please retry with shorter content, "
-                "or split the work into smaller steps."
+                "arguments were incomplete. To write large files, use append_file "
+                "in multiple calls to build the content incrementally instead of "
+                "trying to send it all at once via create_file."
             )
             working_messages.append({
                 "role": "assistant",

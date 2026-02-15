@@ -437,6 +437,15 @@ async def build_llm_context(
             "and str_replace."
         )
 
+    # File writing guidance
+    system_parts.append(
+        "\n\n## File Writing\n\n"
+        "When creating large files, use `append_file` in multiple tool calls to build "
+        "the content incrementally. Do NOT try to write an entire large file in a single "
+        "`create_file` call — the response may be cut off by output token limits. Instead: "
+        "use `create_file` for the first chunk, then `append_file` for subsequent chunks."
+    )
+
     messages.append({"role": "system", "content": "\n".join(system_parts)})
 
     # 5. Previous branch summary

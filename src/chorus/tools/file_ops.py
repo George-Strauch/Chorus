@@ -112,6 +112,31 @@ async def create_file(
 
 
 # ---------------------------------------------------------------------------
+# append_file
+# ---------------------------------------------------------------------------
+
+
+async def append_file(
+    workspace: Path,
+    path: str,
+    content: str,
+) -> FileResult:
+    """Append content to an existing file, or create it if it doesn't exist.
+
+    Use this instead of create_file when building a file incrementally
+    in multiple tool calls (e.g. when the content is too large for a
+    single response).
+    """
+    resolved = resolve_path(workspace, path)
+    resolved.parent.mkdir(parents=True, exist_ok=True)
+
+    with resolved.open("a", encoding="utf-8") as f:
+        f.write(content)
+
+    return FileResult(path=path, action="appended", success=True)
+
+
+# ---------------------------------------------------------------------------
 # str_replace
 # ---------------------------------------------------------------------------
 

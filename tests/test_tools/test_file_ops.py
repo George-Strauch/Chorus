@@ -13,6 +13,7 @@ from chorus.tools.file_ops import (
     BinaryFileError,
     FileNotFoundInWorkspaceError,
     StringNotFoundError,
+    append_file,
     create_file,
     resolve_path,
     str_replace,
@@ -74,6 +75,44 @@ class TestCreateFile:
         result = await create_file(workspace_dir, "unicode.txt", content)
         assert result.success is True
         assert (workspace_dir / "unicode.txt").read_text(encoding="utf-8") == content
+
+
+# ---------------------------------------------------------------------------
+# append_file
+# ---------------------------------------------------------------------------
+
+
+class TestAppendFile:
+    @pytest.mark.asyncio
+    async def test_append_to_existing_file(self, workspace_dir: Path) -> None:
+        f = workspace_dir / "out.txt"
+        f.write_text("line 1\n", encoding="utf-8")
+
+        result = await append_file(workspace_dir, "out.txt", "line 2\n")
+        assert result.success
+        assert result.action == "appended"
+        assert f.read_text(encoding="utf-8") == "line 1\nline 2\n"
+
+    @pytest.mark.asyncio
+    async def test_append_creates_file_if_missing(self, workspace_dir: Path) -> None:
+        result = await append_file(workspace_dir, "new.txt", "hello")
+        assert result.success
+        assert (workspace_dir / "new.txt").read_text(encoding="utf-8") == "hello"
+
+    @pytest.mark.asyncio
+    async def test_append_creates_directories(self, workspace_dir: Path) -> None:
+        result = await append_file(workspace_dir, "sub/dir/file.txt", "content")
+        assert result.success
+        assert (workspace_dir / "sub/dir/file.txt").read_text(encoding="utf-8") == "content"
+
+    @pytest.mark.asyncio
+    async def test_multiple_appends(self, workspace_dir: Path) -> None:
+        await append_file(workspace_dir, "build.txt", "part 1\n")
+        await append_file(workspace_dir, "build.txt", "part 2\n")
+        await append_file(workspace_dir, "build.txt", "part 3\n")
+
+        content = (workspace_dir / "build.txt").read_text(encoding="utf-8")
+        assert content == "part 1\npart 2\npart 3\n"
 
 
 # ---------------------------------------------------------------------------
