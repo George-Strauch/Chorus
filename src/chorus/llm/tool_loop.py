@@ -484,6 +484,58 @@ async def run_tool_loop(
             ),
         )
 
+        # Guard: if stop_reason is "max_tokens", tool call arguments may be
+        # truncated (the API cut off mid-JSON).  Discard the tool calls and
+        # tell the LLM so it can retry with a shorter response.
+        if response.stop_reason == "max_tokens" and response.tool_calls:
+            logger.warning(
+                "Response hit max_tokens with %d tool call(s) — "
+                "arguments likely truncated, discarding",
+                len(response.tool_calls),
+            )
+            truncation_msg = (
+                "Your response was cut off (max_tokens reached) while generating "
+                "tool call arguments. The tool call was NOT executed because the "
+                "arguments were incomplete. Please retry with shorter content, "
+                "or split the work into smaller steps."
+            )
+            working_messages.append({
+                "role": "assistant",
+                "content": response.content or "",
+            })
+            # Feed the error back as a synthetic user message so the LLM can adapt
+            working_messages.append({
+                "role": "user",
+                "content": f"[system: {truncation_msg}]",
+            })
+            consecutive_errors += 1
+            if consecutive_errors >= max_consecutive_errors:
+                msg = (
+                    f"Stopped after {consecutive_errors} consecutive tool errors. "
+                    f"The response keeps hitting the output token limit. "
+                    f"Total tool calls: {total_tool_calls}, iterations: {iteration}."
+                )
+                logger.warning("Circuit breaker tripped (max_tokens): %s", msg)
+                await _fire_event(
+                    on_event,
+                    ToolLoopEvent(
+                        type=ToolLoopEventType.LOOP_COMPLETE,
+                        iteration=iteration,
+                        total_usage=total_usage,
+                        tool_calls_made=total_tool_calls,
+                        tools_used=list(tools_used),
+                        content_preview=msg[:200],
+                    ),
+                )
+                return ToolLoopResult(
+                    content=msg,
+                    messages=working_messages,
+                    total_usage=total_usage,
+                    iterations=iteration,
+                    tool_calls_made=total_tool_calls,
+                )
+            continue
+
         # No tool calls — check for server-side tool results (web search)
         if not response.tool_calls:
             if response._raw_content is not None:

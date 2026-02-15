@@ -2358,3 +2358,221 @@ class TestIsErrorResult:
 
     def test_json_array(self) -> None:
         assert _is_error_result(json.dumps([{"error": "x"}])) is False
+
+
+# ---------------------------------------------------------------------------
+# max_tokens truncation — reproduces the $5.45 bug
+# ---------------------------------------------------------------------------
+
+
+class TestMaxTokensTruncation:
+    """Tests for stop_reason='max_tokens' handling — truncated tool calls
+    are discarded and the LLM is told to retry with shorter content."""
+
+    @pytest.mark.asyncio
+    async def test_truncated_tool_calls_discarded(self, tmp_path: Path) -> None:
+        """Tool calls from a max_tokens response are never executed."""
+        handler = AsyncMock(return_value={"ok": True})
+        registry = ToolRegistry()
+        registry.register(
+            ToolDefinition(
+                name="create_file",
+                description="Create a file",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "File path"},
+                        "content": {"type": "string", "description": "File content (UTF-8)"},
+                    },
+                    "required": ["path", "content"],
+                },
+                handler=handler,
+            )
+        )
+
+        # First response: truncated (max_tokens), second: LLM adapts
+        responses = [
+            LLMResponse(
+                content="I'll create the file now.",
+                tool_calls=[ToolCall(
+                    id="tc_1",
+                    name="create_file",
+                    arguments={"path": "fib.py"},  # 'content' truncated
+                )],
+                stop_reason="max_tokens",
+                usage=Usage(input_tokens=1000, output_tokens=4096),
+                model="claude-sonnet-4-20250514",
+            ),
+            _text_response("My response was too long. Let me split the work."),
+        ]
+        provider = FakeProvider(responses)
+
+        ctx = _make_ctx(tmp_path)
+        result = await run_tool_loop(
+            provider=provider,
+            messages=[{"role": "user", "content": "Create a fibonacci benchmark"}],
+            tools=registry,
+            ctx=ctx,
+            system_prompt="",
+            model="test",
+        )
+
+        handler.assert_not_called()
+        assert result.tool_calls_made == 0
+        assert result.iterations == 2
+
+    @pytest.mark.asyncio
+    async def test_truncation_feedback_sent_to_llm(self, tmp_path: Path) -> None:
+        """The LLM receives a message explaining the truncation."""
+        handler = AsyncMock(return_value={"ok": True})
+        registry = _make_registry(("my_tool", handler))
+
+        call_count = 0
+
+        class TruncatingProvider:
+            @property
+            def provider_name(self) -> str:
+                return "fake"
+
+            async def chat(
+                self,
+                messages: list[dict[str, Any]],
+                tools: list[dict[str, Any]] | None = None,
+                model: str | None = None,
+            ) -> LLMResponse:
+                nonlocal call_count
+                call_count += 1
+                if call_count == 1:
+                    return LLMResponse(
+                        content="Calling tool...",
+                        tool_calls=[ToolCall(id="tc_1", name="my_tool", arguments={"arg": "x"})],
+                        stop_reason="max_tokens",
+                        usage=Usage(input_tokens=100, output_tokens=4096),
+                        model="test",
+                    )
+                # Second call: verify feedback message is in context
+                user_msgs = [m for m in messages if m.get("role") == "user"]
+                assert any(
+                    "max_tokens" in m.get("content", "") or "cut off" in m.get("content", "")
+                    for m in user_msgs
+                ), "Expected truncation feedback in messages"
+                return _text_response("Understood, splitting work.")
+
+        ctx = _make_ctx(tmp_path)
+        result = await run_tool_loop(
+            provider=TruncatingProvider(),
+            messages=[{"role": "user", "content": "Do it"}],
+            tools=registry,
+            ctx=ctx,
+            system_prompt="",
+            model="test",
+        )
+
+        assert result.iterations == 2
+        handler.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_repeated_truncation_trips_circuit_breaker(self, tmp_path: Path) -> None:
+        """If the LLM keeps hitting max_tokens, circuit breaker stops the loop."""
+        handler = AsyncMock(return_value={"ok": True})
+        registry = _make_registry(("my_tool", handler))
+
+        responses = [
+            LLMResponse(
+                content="Trying again...",
+                tool_calls=[ToolCall(
+                    id=f"tc_{i}", name="my_tool", arguments={"arg": "x"},
+                )],
+                stop_reason="max_tokens",
+                usage=Usage(input_tokens=500, output_tokens=4096),
+                model="test",
+            )
+            for i in range(20)
+        ]
+        provider = FakeProvider(responses)
+
+        ctx = _make_ctx(tmp_path)
+        result = await run_tool_loop(
+            provider=provider,
+            messages=[{"role": "user", "content": "Do it"}],
+            tools=registry,
+            ctx=ctx,
+            system_prompt="",
+            model="test",
+            max_iterations=20,
+        )
+
+        assert "consecutive tool errors" in (result.content or "").lower()
+        assert "output token limit" in (result.content or "").lower()
+        assert result.tool_calls_made == 0
+        assert result.iterations == 5  # trips on 5th
+        handler.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_normal_stop_reason_still_executes_tools(self, tmp_path: Path) -> None:
+        """stop_reason='tool_use' (normal) still executes tool calls as before."""
+        handler = AsyncMock(return_value={"ok": True})
+        registry = _make_registry(("my_tool", handler))
+
+        provider = FakeProvider([
+            LLMResponse(
+                content="Calling tool...",
+                tool_calls=[ToolCall(id="tc_1", name="my_tool", arguments={"arg": "x"})],
+                stop_reason="tool_use",
+                usage=Usage(input_tokens=20, output_tokens=15),
+                model="test",
+            ),
+            _text_response("Done."),
+        ])
+
+        ctx = _make_ctx(tmp_path)
+        result = await run_tool_loop(
+            provider=provider,
+            messages=[{"role": "user", "content": "Do it"}],
+            tools=registry,
+            ctx=ctx,
+            system_prompt="",
+            model="test",
+        )
+
+        assert result.content == "Done."
+        assert result.tool_calls_made == 1
+        handler.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_max_tokens_fires_loop_complete_on_breaker(self, tmp_path: Path) -> None:
+        """Circuit breaker from max_tokens fires LOOP_COMPLETE event."""
+        handler = AsyncMock(return_value={"ok": True})
+        registry = _make_registry(("my_tool", handler))
+
+        responses = [
+            LLMResponse(
+                content="...",
+                tool_calls=[ToolCall(id=f"tc_{i}", name="my_tool", arguments={"arg": "x"})],
+                stop_reason="max_tokens",
+                usage=Usage(input_tokens=100, output_tokens=4096),
+                model="test",
+            )
+            for i in range(10)
+        ]
+        provider = FakeProvider(responses)
+
+        events: list[ToolLoopEvent] = []
+
+        async def recorder(event: ToolLoopEvent) -> None:
+            events.append(event)
+
+        ctx = _make_ctx(tmp_path)
+        await run_tool_loop(
+            provider=provider,
+            messages=[{"role": "user", "content": "Do it"}],
+            tools=registry,
+            ctx=ctx,
+            system_prompt="",
+            model="test",
+            max_iterations=10,
+            on_event=recorder,
+        )
+
+        loop_complete = [e for e in events if e.type == ToolLoopEventType.LOOP_COMPLETE]
+        assert len(loop_complete) == 1
