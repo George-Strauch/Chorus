@@ -14,6 +14,7 @@ from chorus.llm.providers import (
     OpenAIProvider,
     Usage,
     _messages_to_anthropic,
+    estimate_cost,
     tools_to_anthropic,
     tools_to_openai,
 )
@@ -52,6 +53,8 @@ def _make_anthropic_text_response(
     usage = MagicMock()
     usage.input_tokens = input_tokens
     usage.output_tokens = output_tokens
+    usage.cache_creation_input_tokens = 0
+    usage.cache_read_input_tokens = 0
 
     resp = MagicMock()
     resp.content = [block]
@@ -944,3 +947,143 @@ class TestMessagesToAnthropicWebSearch:
         _, translated = _messages_to_anthropic(messages)
         assert translated[1]["role"] == "assistant"
         assert translated[1]["content"] == "Hello!"
+
+
+# ---------------------------------------------------------------------------
+# Token-based cost estimation
+# ---------------------------------------------------------------------------
+
+
+class TestEstimateCost:
+    def test_anthropic_sonnet_cost(self) -> None:
+        """Anthropic: input_tokens excludes cache, so all four buckets used."""
+        usage = Usage(
+            input_tokens=1000,
+            output_tokens=500,
+            cache_creation_input_tokens=200,
+            cache_read_input_tokens=300,
+        )
+        cost = estimate_cost("claude-sonnet-4-5-20250514", usage)
+        # 1000*3e-6 + 500*15e-6 + 200*3.75e-6 + 300*0.3e-6
+        expected = 1000 * 3e-6 + 500 * 15e-6 + 200 * 3.75e-6 + 300 * 0.3e-6
+        assert cost == pytest.approx(expected)
+
+    def test_anthropic_opus_cost(self) -> None:
+        usage = Usage(input_tokens=500, output_tokens=100)
+        cost = estimate_cost("claude-opus-4-20250514", usage)
+        expected = 500 * 15e-6 + 100 * 75e-6
+        assert cost == pytest.approx(expected)
+
+    def test_anthropic_haiku_cost(self) -> None:
+        usage = Usage(input_tokens=10000, output_tokens=2000)
+        cost = estimate_cost("claude-haiku-4-5-20251001", usage)
+        expected = 10000 * 0.8e-6 + 2000 * 4e-6
+        assert cost == pytest.approx(expected)
+
+    def test_openai_gpt4o_cost(self) -> None:
+        """OpenAI: input_tokens includes cached tokens, so subtract cached."""
+        usage = Usage(
+            input_tokens=1000,
+            output_tokens=500,
+            cache_read_input_tokens=300,
+        )
+        cost = estimate_cost("gpt-4o-2024-08-06", usage)
+        # non_cached = 1000 - 300 = 700
+        expected = 700 * 2.5e-6 + 300 * 1.25e-6 + 500 * 10e-6
+        assert cost == pytest.approx(expected)
+
+    def test_openai_gpt4o_mini_cost(self) -> None:
+        usage = Usage(input_tokens=5000, output_tokens=1000)
+        cost = estimate_cost("gpt-4o-mini-2024-07-18", usage)
+        expected = 5000 * 0.15e-6 + 1000 * 0.6e-6
+        assert cost == pytest.approx(expected)
+
+    def test_openai_o3_cost(self) -> None:
+        usage = Usage(input_tokens=2000, output_tokens=800)
+        cost = estimate_cost("o3-2025-04-16", usage)
+        expected = 2000 * 10e-6 + 800 * 40e-6
+        assert cost == pytest.approx(expected)
+
+    def test_openai_o3_mini_cost(self) -> None:
+        usage = Usage(input_tokens=3000, output_tokens=1000)
+        cost = estimate_cost("o3-mini-2025-01-31", usage)
+        expected = 3000 * 1.1e-6 + 1000 * 4.4e-6
+        assert cost == pytest.approx(expected)
+
+    def test_unknown_model_returns_zero(self) -> None:
+        usage = Usage(input_tokens=1000, output_tokens=500)
+        assert estimate_cost("unknown-model-v1", usage) == 0.0
+
+    def test_prefix_matching_longest_first(self) -> None:
+        """gpt-4o-mini matches before gpt-4o due to table order."""
+        usage = Usage(input_tokens=1000, output_tokens=500)
+        cost_mini = estimate_cost("gpt-4o-mini-2024-07-18", usage)
+        cost_4o = estimate_cost("gpt-4o-2024-08-06", usage)
+        # Mini is much cheaper
+        assert cost_mini < cost_4o
+
+    def test_zero_tokens_returns_zero(self) -> None:
+        usage = Usage(input_tokens=0, output_tokens=0)
+        assert estimate_cost("claude-sonnet-4-5-20250514", usage) == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Provider cost integration (cost_usd set on Usage)
+# ---------------------------------------------------------------------------
+
+
+class TestProviderCostIntegration:
+    @pytest.mark.asyncio
+    async def test_anthropic_sets_cost_usd(self) -> None:
+        """AnthropicProvider.chat() populates usage.cost_usd."""
+        mock_client = MagicMock()
+        mock_client.messages = MagicMock()
+        resp = _make_anthropic_text_response(
+            model="claude-sonnet-4-5-20250514",
+            input_tokens=1000,
+            output_tokens=500,
+        )
+        mock_client.messages.create = AsyncMock(return_value=resp)
+
+        provider = AnthropicProvider(
+            "sk-ant-test", "claude-sonnet-4-5-20250514", _client=mock_client,
+        )
+        result = await provider.chat(messages=[{"role": "user", "content": "Hi"}])
+
+        assert result.usage.cost_usd > 0
+        expected = estimate_cost("claude-sonnet-4-5-20250514", result.usage)
+        assert result.usage.cost_usd == pytest.approx(expected)
+
+    @pytest.mark.asyncio
+    async def test_openai_sets_cost_usd(self) -> None:
+        """OpenAIProvider.chat() populates usage.cost_usd."""
+        mock_client = MagicMock()
+        mock_client.chat = MagicMock()
+        mock_client.chat.completions = MagicMock()
+        resp = _make_openai_text_response(
+            model="gpt-4o-2024-08-06",
+            input_tokens=1000,
+            output_tokens=500,
+        )
+        mock_client.chat.completions.create = AsyncMock(return_value=resp)
+
+        provider = OpenAIProvider("sk-test", "gpt-4o", _client=mock_client)
+        result = await provider.chat(messages=[{"role": "user", "content": "Hi"}])
+
+        assert result.usage.cost_usd > 0
+        expected = estimate_cost("gpt-4o-2024-08-06", result.usage)
+        assert result.usage.cost_usd == pytest.approx(expected)
+
+    @pytest.mark.asyncio
+    async def test_unknown_model_cost_is_zero(self) -> None:
+        """Unknown model produces cost_usd == 0."""
+        mock_client = MagicMock()
+        mock_client.chat = MagicMock()
+        mock_client.chat.completions = MagicMock()
+        resp = _make_openai_text_response(model="some-unknown-model")
+        mock_client.chat.completions.create = AsyncMock(return_value=resp)
+
+        provider = OpenAIProvider("sk-test", "some-unknown-model", _client=mock_client)
+        result = await provider.chat(messages=[{"role": "user", "content": "Hi"}])
+
+        assert result.usage.cost_usd == 0.0

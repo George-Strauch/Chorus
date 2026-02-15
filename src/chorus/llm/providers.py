@@ -93,6 +93,70 @@ class LLMProvider(Protocol):
 
 
 # ---------------------------------------------------------------------------
+# Token-based cost estimation
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _Pricing:
+    """Per-token pricing in USD."""
+
+    input: float
+    output: float
+    cache_write: float = 0.0
+    cache_read: float = 0.0
+
+
+# Longest prefix first so "gpt-4o-mini" matches before "gpt-4o".
+_PRICING_TABLE: list[tuple[str, _Pricing]] = [
+    # Anthropic
+    ("claude-opus-4", _Pricing(15e-6, 75e-6, 18.75e-6, 1.5e-6)),
+    ("claude-sonnet-4-5", _Pricing(3e-6, 15e-6, 3.75e-6, 0.3e-6)),
+    ("claude-sonnet-4", _Pricing(3e-6, 15e-6, 3.75e-6, 0.3e-6)),
+    ("claude-haiku-4-5", _Pricing(0.8e-6, 4e-6, 1.0e-6, 0.08e-6)),
+    # OpenAI
+    ("chatgpt-4o", _Pricing(2.5e-6, 10e-6, 2.5e-6, 1.25e-6)),
+    ("gpt-4o-mini", _Pricing(0.15e-6, 0.6e-6, 0.15e-6, 0.075e-6)),
+    ("gpt-4o", _Pricing(2.5e-6, 10e-6, 2.5e-6, 1.25e-6)),
+    ("gpt-5", _Pricing(2.5e-6, 10e-6, 2.5e-6, 1.25e-6)),
+    ("o3-mini", _Pricing(1.1e-6, 4.4e-6, 1.1e-6, 0.55e-6)),
+    ("o3", _Pricing(10e-6, 40e-6, 10e-6, 5e-6)),
+]
+
+
+def estimate_cost(model: str, usage: Usage) -> float:
+    """Estimate USD cost from model name and token usage.
+
+    Handles the semantic difference between Anthropic (``input_tokens``
+    excludes cached tokens) and OpenAI (``input_tokens`` *includes*
+    cached tokens).  Returns 0 for unknown models.
+    """
+    pricing: _Pricing | None = None
+    for prefix, p in _PRICING_TABLE:
+        if model.startswith(prefix):
+            pricing = p
+            break
+    if pricing is None:
+        return 0.0
+
+    if model.startswith("claude"):
+        # Anthropic: input_tokens excludes cached tokens
+        return (
+            usage.input_tokens * pricing.input
+            + usage.output_tokens * pricing.output
+            + usage.cache_creation_input_tokens * pricing.cache_write
+            + usage.cache_read_input_tokens * pricing.cache_read
+        )
+    # OpenAI: input_tokens includes cached tokens
+    non_cached = max(0, usage.input_tokens - usage.cache_read_input_tokens)
+    return (
+        non_cached * pricing.input
+        + usage.cache_read_input_tokens * pricing.cache_read
+        + usage.output_tokens * pricing.output
+    )
+
+
+# ---------------------------------------------------------------------------
 # Tool schema translation
 # ---------------------------------------------------------------------------
 
@@ -307,18 +371,21 @@ class AnthropicProvider:
                 for block in response.content
             ]
 
+        usage = Usage(
+            input_tokens=response.usage.input_tokens,
+            output_tokens=response.usage.output_tokens,
+            cache_creation_input_tokens=(
+                getattr(response.usage, "cache_creation_input_tokens", 0) or 0
+            ),
+            cache_read_input_tokens=getattr(response.usage, "cache_read_input_tokens", 0) or 0,
+        )
+        usage.cost_usd = estimate_cost(response.model, usage)
+
         return LLMResponse(
             content=content_text,
             tool_calls=tool_calls,
             stop_reason=response.stop_reason,
-            usage=Usage(
-                input_tokens=response.usage.input_tokens,
-                output_tokens=response.usage.output_tokens,
-                cache_creation_input_tokens=(
-                    getattr(response.usage, "cache_creation_input_tokens", 0) or 0
-                ),
-                cache_read_input_tokens=getattr(response.usage, "cache_read_input_tokens", 0) or 0,
-            ),
+            usage=usage,
             model=response.model,
             _raw_content=raw_content,
         )
@@ -391,14 +458,17 @@ class OpenAIProvider:
         if details is not None:
             cached = getattr(details, "cached_tokens", 0) or 0
 
+        usage = Usage(
+            input_tokens=response.usage.prompt_tokens,
+            output_tokens=response.usage.completion_tokens,
+            cache_read_input_tokens=cached,
+        )
+        usage.cost_usd = estimate_cost(response.model, usage)
+
         return LLMResponse(
             content=message.content,
             tool_calls=tool_calls,
             stop_reason=choice.finish_reason,
-            usage=Usage(
-                input_tokens=response.usage.prompt_tokens,
-                output_tokens=response.usage.completion_tokens,
-                cache_read_input_tokens=cached,
-            ),
+            usage=usage,
             model=response.model,
         )
