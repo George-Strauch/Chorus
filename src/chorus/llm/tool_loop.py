@@ -61,6 +61,7 @@ _TOOL_TO_CATEGORY: dict[str, str] = {
     "self_edit_web_search": "self_edit",
     "list_models": "info",
     "web_search": "web_search",
+    "claude_code": "claude_code",
 }
 
 
@@ -96,6 +97,8 @@ def _build_action_string(tool_name: str, arguments: dict[str, Any]) -> str:
             detail = f"web_search {arguments.get('enabled', '')}"
         else:
             detail = sub
+    elif category == "claude_code":
+        detail = arguments.get("task", "")[:100]
     elif category == "web_search":
         detail = "enabled"
     else:
@@ -190,6 +193,7 @@ class ToolExecutionContext:
     chorus_home: Path | None = None
     is_admin: bool = False
     db: Any = None
+    host_execution: bool = False
 
 
 @dataclass
@@ -277,6 +281,8 @@ async def _execute_tool(
         kwargs["is_admin"] = ctx.is_admin
     if "db" in sig.parameters and "db" not in arguments:
         kwargs["db"] = ctx.db
+    if "host_execution" in sig.parameters and "host_execution" not in arguments:
+        kwargs["host_execution"] = ctx.host_execution
 
     result = await tool.handler(**kwargs)
 

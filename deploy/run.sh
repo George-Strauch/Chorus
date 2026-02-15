@@ -14,8 +14,8 @@ if [ ! -f .env ]; then
 fi
 
 # --- Auto-detect IDs ---
-export UID="$(id -u)"
-export GID="$(id -g)"
+export HOST_UID="$(id -u)"
+export HOST_GID="$(id -g)"
 
 # Docker socket GID (needed so container user can talk to Docker)
 if [ -S /var/run/docker.sock ]; then
@@ -29,7 +29,7 @@ fi
 export SCOPE_PATH="${SCOPE_PATH:-$HOME}"
 
 echo "Starting Chorus..."
-echo "  UID=$UID  GID=$GID  DOCKER_GID=$DOCKER_GID"
+echo "  UID=$HOST_UID  GID=$HOST_GID  DOCKER_GID=$DOCKER_GID"
 echo "  SCOPE_PATH=$SCOPE_PATH"
 
 docker compose build && docker compose up -d

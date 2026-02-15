@@ -471,6 +471,44 @@ def create_default_registry() -> ToolRegistry:
         )
     )
 
+    # -- Claude Code tool (conditional) ----------------------------------------
+
+    from chorus.tools.claude_code import claude_code_execute, is_claude_code_available
+
+    if is_claude_code_available():
+        registry.register(
+            ToolDefinition(
+                name="claude_code",
+                description=(
+                    "Delegate a coding task to Claude Code — use for creating and editing "
+                    "code files (.py, .js, .ts, .go, .rs, etc.). Provide a clear, detailed "
+                    "task description. For non-code files (.md, .txt, .json, .yaml), "
+                    "use create_file and str_replace instead."
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "task": {
+                            "type": "string",
+                            "description": (
+                                "Clear description of the coding task to perform"
+                            ),
+                        },
+                        "max_turns": {
+                            "type": "integer",
+                            "description": "Max agentic turns (default 50)",
+                        },
+                        "max_budget_usd": {
+                            "type": "number",
+                            "description": "Max cost budget in USD (default 1.0)",
+                        },
+                    },
+                    "required": ["task"],
+                },
+                handler=claude_code_execute,
+            )
+        )
+
     registry.register(
         ToolDefinition(
             name="self_edit_web_search",

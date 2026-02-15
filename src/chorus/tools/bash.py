@@ -81,14 +81,26 @@ ALLOWED_ENV_VARS: frozenset[str] = frozenset(
 )
 
 
-def _sanitized_env(workspace: Path, overrides: dict[str, str] | None = None) -> dict[str, str]:
+def _sanitized_env(
+    workspace: Path,
+    overrides: dict[str, str] | None = None,
+    host_execution: bool = False,
+) -> dict[str, str]:
     """Build a sanitized environment for subprocess execution.
 
-    Only variables in :data:`ALLOWED_ENV_VARS` are carried over.
-    ``HOME`` is jailed to the workspace directory.
+    When *host_execution* is False (default): only variables in
+    :data:`ALLOWED_ENV_VARS` are carried over and ``HOME`` is jailed
+    to the workspace directory.
+
+    When *host_execution* is True: the full host environment is passed
+    through and ``HOME`` is NOT jailed. This gives the subprocess access
+    to the host's full development environment (compilers, tools, etc.).
     """
-    env = {k: v for k, v in os.environ.items() if k in ALLOWED_ENV_VARS}
-    env["HOME"] = str(workspace)
+    if host_execution:
+        env = dict(os.environ)
+    else:
+        env = {k: v for k, v in os.environ.items() if k in ALLOWED_ENV_VARS}
+        env["HOME"] = str(workspace)
     if overrides:
         env.update(overrides)
     return env
@@ -201,6 +213,7 @@ async def bash_execute(
     env_overrides: dict[str, str] | None = None,
     agent_name: str = "",
     sigterm_grace: float = _DEFAULT_SIGTERM_GRACE_SECONDS,
+    host_execution: bool = False,
 ) -> BashResult:
     """Execute *command* in a subprocess within *workspace*.
 
@@ -244,7 +257,7 @@ async def bash_execute(
         raise CommandNeedsApprovalError(command)
 
     # 3. Build sanitized environment
-    env = _sanitized_env(workspace, env_overrides)
+    env = _sanitized_env(workspace, env_overrides, host_execution=host_execution)
 
     # 4. Execute
     tracker = get_process_tracker()

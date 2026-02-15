@@ -425,6 +425,18 @@ async def build_llm_context(
             f"The environment variable `$SCOPE_PATH` is also available in bash and expands to `{scope_path}`."
         )
 
+    # Claude Code awareness
+    from chorus.tools.claude_code import is_claude_code_available
+
+    if is_claude_code_available():
+        system_parts.append(
+            "\n\n## Code Editing\n\n"
+            "You have access to the `claude_code` tool for creating and editing code files "
+            "(.py, .js, .ts, .go, .rs, etc.). Delegate code editing tasks to this tool for "
+            "better results. For non-code files (.md, .txt, .json, .yaml), use create_file "
+            "and str_replace."
+        )
+
     messages.append({"role": "system", "content": "\n".join(system_parts)})
 
     # 5. Previous branch summary

@@ -1,6 +1,6 @@
 # Backlog: Claude Code SDK / Agent SDK Integration
 
-> **Status:** IDEA — evaluate after implementing prompt caching (TODO 023) and parallel execution (TODO 022)
+> **Status:** IMPLEMENTED (TODO 028) — integrated as a tool, not a full replacement
 > **Added:** 2026-02-14
 
 ## Overview
@@ -83,17 +83,15 @@ async def permission_handler(tool_name, input_data, context):
 
 ## Decision
 
-**Not now.** The SDK is promising but the trade-offs are significant:
-1. Losing OpenAI support limits our model tiering strategy
-2. The SDK is too young (v0.1.x) for production dependency
-3. Implementing prompt caching ourselves (TODO 023) gets 80% of the cost benefit
-4. Our custom tool implementations give us fine-grained control
+**Implemented as a tool (TODO 028).** Rather than replacing the entire tool stack, we
+integrated Claude Code as a new `claude_code` tool that the bot's LLM can invoke for
+coding tasks. This preserves OpenAI support, custom tool control, and the existing
+permission engine while getting the benefit of Claude Code's optimized file editing.
 
-**Revisit when:**
+**Full replacement revisit when:**
 - The Agent SDK reaches v1.0
-- We've implemented prompt caching and parallel execution and costs are still too high
 - OpenAI support is added to the SDK
-- We want plan mode (TODO 018) and don't want to build it ourselves
+- We want to eliminate the custom tool loop entirely
 
 ## Resources
 

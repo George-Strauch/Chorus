@@ -21,6 +21,7 @@ class BotConfig:
     chorus_home: Path = field(default_factory=lambda: Path.home() / ".chorus-agents")
     dev_guild_id: int | None = None
     scope_path: Path | None = None
+    host_execution: bool = False
     live_test_enabled: bool = False
     live_test_channel: str | None = None
 
@@ -49,6 +50,9 @@ class BotConfig:
         raw_scope = os.environ.get("CHORUS_SCOPE_PATH", "").strip()
         scope_path = Path(raw_scope).expanduser().resolve() if raw_scope else None
 
+        raw_host_exec = os.environ.get("CHORUS_HOST_EXEC", "").strip().lower()
+        host_execution = raw_host_exec in ("1", "true", "yes")
+
         raw_live_test = os.environ.get("LIVE_TEST_ENABLED", "").strip().lower()
         live_test_enabled = raw_live_test in ("1", "true", "yes")
 
@@ -61,6 +65,7 @@ class BotConfig:
             openai_api_key=openai_key,
             chorus_home=chorus_home,
             scope_path=scope_path,
+            host_execution=host_execution,
             dev_guild_id=dev_guild_id,
             live_test_enabled=live_test_enabled,
             live_test_channel=live_test_channel,

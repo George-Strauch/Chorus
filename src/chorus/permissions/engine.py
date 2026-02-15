@@ -140,6 +140,7 @@ PRESETS: dict[str, PermissionProfile] = {
             r"tool:git:(push|merge_request).*",
             r"tool:self_edit:(system_prompt|permissions|model).*",
             r"tool:web_search:.*",
+            r"tool:claude_code:.*",
         ],
     ),
     "guarded": PermissionProfile(

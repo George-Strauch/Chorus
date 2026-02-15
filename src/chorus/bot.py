@@ -414,6 +414,7 @@ class ChorusBot(commands.Bot):
                 chorus_home=self.config.chorus_home,
                 is_admin=is_admin,
                 db=self.db,
+                host_execution=self.config.host_execution,
             )
 
             # Get previous branch summary for context

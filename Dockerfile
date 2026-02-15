@@ -7,6 +7,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         git curl ca-certificates openssh-client \
     && rm -rf /var/lib/apt/lists/*
 
+# Install Node.js 18 (required runtime for Claude Code CLI bundled with agent SDK)
+RUN curl -fsSL https://deb.nodesource.com/setup_18.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
 # Install Docker CLI (static binary — no daemon, just the client)
 RUN curl -fsSL https://download.docker.com/linux/static/stable/x86_64/docker-27.5.1.tgz \
     | tar xz --strip-components=1 -C /usr/local/bin docker/docker
