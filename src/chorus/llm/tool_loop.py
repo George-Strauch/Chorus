@@ -54,6 +54,7 @@ _TOOL_TO_CATEGORY: dict[str, str] = {
     "git_diff": "git",
     "git_log": "git",
     "git_merge_request": "git",
+    "git_status": "git",
     "self_edit_system_prompt": "self_edit",
     "self_edit_docs": "self_edit",
     "self_edit_permissions": "self_edit",

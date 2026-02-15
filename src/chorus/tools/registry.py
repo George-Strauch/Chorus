@@ -531,4 +531,24 @@ def create_default_registry() -> ToolRegistry:
         )
     )
 
+    # -- Git status tool -------------------------------------------------------
+
+    from chorus.sub_agents.tasks.git_status import git_status_execute
+
+    registry.register(
+        ToolDefinition(
+            name="git_status",
+            description=(
+                "Get a comprehensive git status report for all repositories the agent "
+                "has context for. Shows branch, recent commits, and changes for each repo."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+            handler=git_status_execute,
+        )
+    )
+
     return registry
