@@ -107,6 +107,7 @@ class ChorusBot(commands.Bot):
 
         self._hook_dispatcher = _HookDispatcher(
             process_manager=self._process_manager,
+            branch_spawner=self,
             notify_callback=self._hook_notify_channel,
             thread_kill_callback=self._hook_kill_thread,
             inject_callback=self._hook_inject_context,
@@ -343,6 +344,69 @@ class ChorusBot(commands.Bot):
         thread = tm.get_thread(branch_id)
         if thread is not None and thread.inject_queue is not None:
             await thread.inject_queue.put({"role": "user", "content": message})
+
+    async def spawn_hook_branch(
+        self,
+        agent_name: str,
+        hook_context: str,
+        model: str | None = None,
+        recursion_depth: int = 0,
+    ) -> None:
+        """Spawn a new LLM branch triggered by a process hook.
+
+        Satisfies the BranchSpawner protocol used by HookDispatcher.
+        """
+        # Look up agent
+        agent = await self.agent_manager.get_agent(agent_name)
+        if agent is None:
+            logger.warning("spawn_hook_branch: agent %s not found", agent_name)
+            return
+
+        # Find the Discord channel for this agent
+        channel = self._find_channel_for_agent(agent_name)
+        if channel is None:
+            logger.warning("spawn_hook_branch: no channel for agent %s", agent_name)
+            return
+
+        # Get or create ThreadManager + ContextManager
+        tm = self._thread_managers.setdefault(
+            agent_name, ThreadManager(agent_name, db=self.db)
+        )
+        await tm.initialize()
+
+        if agent_name not in self._context_managers:
+            agent_dir = self.agent_manager._directory._agents_dir / agent_name
+            sessions_dir = agent_dir / "sessions"
+            self._context_managers[agent_name] = ContextManager(
+                agent_name, self.db, sessions_dir
+            )
+        cm = self._context_managers[agent_name]
+
+        # Create branch with hook context as the user message
+        thread = await tm.create_branch({"role": "user", "content": hook_context})
+        await cm.persist_message(
+            role="user",
+            content=hook_context,
+            thread_id=thread.id,
+            discord_message_id=None,
+        )
+        await self._update_branch_last_message(agent_name, thread.id)
+        await self._generate_branch_summary(agent_name, thread.id, hook_context)
+
+        # Build runner with optional model override
+        runner = self._make_llm_runner(
+            agent, tm, cm,
+            channel=channel,
+            author_id=0,  # Hook-spawned — no human author
+            is_admin=True,  # Hook branches run with full permissions
+            target_thread=thread,
+            model_override=model,
+        )
+        tm.start_thread(thread, runner=runner)
+        logger.info(
+            "spawn_hook_branch: started branch #%d for agent %s (depth=%d)",
+            thread.id, agent_name, recursion_depth,
+        )
 
     async def on_message(self, message: discord.Message) -> None:
         """Route messages to agent threads or process as commands."""

@@ -572,11 +572,20 @@ def create_default_registry() -> ToolRegistry:
             name="run_concurrent",
             description=(
                 "Start a long-running process that runs alongside this branch. "
-                "Launch ONE process per independent script/command. Do NOT chain "
-                "multiple scripts with && — spawn separate processes for each. "
-                "Use working_directory to set where the command runs instead of cd. "
-                "Provide instructions for what should happen when the process "
-                "produces output or exits (e.g. 'if it fails, fix it')."
+                "Launch ONE process per command — do NOT chain with &&. "
+                "Use working_directory to set the cwd instead of cd.\n\n"
+                "The 'instructions' parameter controls what happens when the process "
+                "produces output or exits. Available hook actions:\n"
+                "- spawn_branch: Start a NEW autonomous LLM branch to handle events\n"
+                "- inject_context: Send a message to THIS branch's conversation\n"
+                "- notify_channel: Post a notification to Discord\n"
+                "- stop_process: Kill the process\n"
+                "- stop_branch: Kill this execution branch\n\n"
+                "Instruction examples:\n"
+                '- "If it fails, diagnose and fix the issue"\n'
+                '- "When it succeeds, run the tests next"\n'
+                '- "Stop the process if errors appear in output"\n'
+                '- "On success, run again with the next parameter value"'
             ),
             parameters={
                 "type": "object",
@@ -591,8 +600,14 @@ def create_default_registry() -> ToolRegistry:
                     "instructions": {
                         "type": "string",
                         "description": (
-                            "NL instructions for hooks "
-                            "(e.g. 'stop if errors appear')"
+                            "What should happen when the process exits or produces "
+                            "matching output. Written in natural language. "
+                            "Examples: 'if it fails, fix the error and retry', "
+                            "'on success, run the next step', "
+                            "'notify me when done'. "
+                            "These instructions are translated into hook callbacks "
+                            "that can spawn new LLM branches, inject context, "
+                            "send notifications, or stop processes."
                         ),
                     },
                     "working_directory": {
@@ -613,13 +628,22 @@ def create_default_registry() -> ToolRegistry:
         ToolDefinition(
             name="run_background",
             description=(
-                "Start a long-running background process that outlives this branch. "
-                "Launch ONE process per independent script/command. Do NOT chain "
-                "multiple scripts with && — spawn separate processes for each. "
-                "Use working_directory to set where the command runs instead of cd. "
-                "Hooks spawn new branches to react to process events. "
-                "Provide instructions for what should happen when the process "
-                "produces output or exits."
+                "Start a long-running background process that OUTLIVES this branch. "
+                "Launch ONE process per command — do NOT chain with &&. "
+                "Use working_directory to set the cwd instead of cd.\n\n"
+                "The 'instructions' parameter controls what happens when the process "
+                "produces output or exits. Hook actions spawn NEW autonomous branches "
+                "to react to events. Available hook actions:\n"
+                "- spawn_branch: Start a new LLM branch to handle the event (most common)\n"
+                "- notify_channel: Post a notification to Discord\n"
+                "- stop_process: Kill the process\n"
+                "- inject_context: Send a message to the spawning branch (if still alive)\n"
+                "- stop_branch: Kill the spawning branch\n\n"
+                "Instruction examples:\n"
+                '- "If it fails, diagnose the error and fix it"\n'
+                '- "On success, run the same script with n+1"\n'
+                '- "Notify me when done"\n'
+                '- "If it fails, notify me; if it succeeds, continue with the next task"'
             ),
             parameters={
                 "type": "object",
@@ -634,8 +658,13 @@ def create_default_registry() -> ToolRegistry:
                     "instructions": {
                         "type": "string",
                         "description": (
-                            "NL instructions for hooks "
-                            "(e.g. 'notify me when it finishes')"
+                            "What should happen when the process exits or produces "
+                            "matching output. Written in natural language. "
+                            "Examples: 'if it fails, fix the error and retry', "
+                            "'on success, run the next iteration', "
+                            "'notify me when done'. "
+                            "These are translated into hook callbacks that spawn "
+                            "new LLM branches, send notifications, or stop processes."
                         ),
                     },
                     "model": {

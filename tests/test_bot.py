@@ -488,3 +488,115 @@ class TestLiveStatusWiring:
         last_edit = status_msg.edit.call_args
         content = last_edit.kwargs["content"]
         assert f"branch #{thread.id}" in content
+
+
+# ---------------------------------------------------------------------------
+# spawn_hook_branch
+# ---------------------------------------------------------------------------
+
+
+class TestSpawnHookBranch:
+    """Tests for ChorusBot.spawn_hook_branch — BranchSpawner protocol."""
+
+    async def test_spawn_creates_branch_and_starts_thread(
+        self,
+        bot_config: BotConfig,
+        tmp_chorus_home: Path,
+        tmp_template: Path,
+    ) -> None:
+        """spawn_hook_branch should look up agent, create a branch, and start it."""
+        from chorus.models import Agent
+
+        bot = ChorusBot(bot_config)
+        bot.db = MagicMock()
+        bot.db.get_branch = AsyncMock(return_value=None)
+        bot.db.create_branch = AsyncMock(return_value=1)
+        bot.db.get_latest_branch_id = AsyncMock(return_value=0)
+        bot.db.update_branch_last_message = AsyncMock()
+        bot.db.set_branch_summary = AsyncMock()
+        bot.db.persist_message = AsyncMock()
+
+        agent = Agent(
+            name="hook-agent",
+            channel_id=100,
+            model="claude-sonnet-4-20250514",
+            system_prompt="You are helpful.",
+            permissions="open",
+        )
+        bot.agent_manager = MagicMock()
+        bot.agent_manager.get_agent = AsyncMock(return_value=agent)
+        bot.agent_manager._directory._agents_dir = tmp_chorus_home / "agents"
+
+        # Create agent dir so ContextManager doesn't fail
+        from chorus.agent.directory import AgentDirectory
+        directory = AgentDirectory(tmp_chorus_home, tmp_template)
+        directory.ensure_home()
+        directory.create("hook-agent")
+
+        # Set up a channel mapping
+        mock_channel = MagicMock(spec=discord.TextChannel)
+        mock_channel.id = 100
+        bot._channel_to_agent[100] = "hook-agent"
+        bot.get_channel = MagicMock(return_value=mock_channel)
+
+        # Mock _make_llm_runner to return a no-op runner
+        runner_mock = AsyncMock()
+        bot._make_llm_runner = MagicMock(return_value=runner_mock)
+
+        await bot.spawn_hook_branch(
+            agent_name="hook-agent",
+            hook_context="Process exited. Fix the error.",
+            model="claude-haiku-4-5-20251001",
+            recursion_depth=1,
+        )
+
+        # Agent was looked up
+        bot.agent_manager.get_agent.assert_awaited_once_with("hook-agent")
+
+        # _make_llm_runner was called with model_override
+        bot._make_llm_runner.assert_called_once()
+        call_kwargs = bot._make_llm_runner.call_args
+        assert call_kwargs.kwargs["model_override"] == "claude-haiku-4-5-20251001"
+        assert call_kwargs.kwargs["is_admin"] is True
+        assert call_kwargs.kwargs["author_id"] == 0
+
+    async def test_spawn_no_op_when_agent_not_found(
+        self, bot_config: BotConfig
+    ) -> None:
+        """spawn_hook_branch is a no-op when agent doesn't exist."""
+        bot = ChorusBot(bot_config)
+        bot.db = MagicMock()
+        bot.agent_manager = MagicMock()
+        bot.agent_manager.get_agent = AsyncMock(return_value=None)
+
+        # Should not raise
+        await bot.spawn_hook_branch(
+            agent_name="nonexistent",
+            hook_context="Test",
+        )
+        bot.agent_manager.get_agent.assert_awaited_once_with("nonexistent")
+
+    async def test_spawn_no_op_when_no_channel(
+        self, bot_config: BotConfig
+    ) -> None:
+        """spawn_hook_branch is a no-op when no Discord channel found."""
+        from chorus.models import Agent
+
+        bot = ChorusBot(bot_config)
+        bot.db = MagicMock()
+        agent = Agent(
+            name="orphan",
+            channel_id=100,
+            model=None,
+            system_prompt="test",
+            permissions="open",
+        )
+        bot.agent_manager = MagicMock()
+        bot.agent_manager.get_agent = AsyncMock(return_value=agent)
+        # No channel mapping → _find_channel_for_agent returns None
+
+        await bot.spawn_hook_branch(
+            agent_name="orphan",
+            hook_context="Test",
+        )
+        # No crash = pass
