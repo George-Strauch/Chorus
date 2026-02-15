@@ -72,6 +72,20 @@ class TestFormatResponseFooter:
         footer = format_response_footer(snap)
         assert "cached" not in footer
 
+    def test_footer_shows_cost_when_nonzero(self) -> None:
+        snap = self._make_snapshot(
+            token_usage=Usage(input_tokens=1000, output_tokens=200, cost_usd=0.042),
+        )
+        footer = format_response_footer(snap)
+        assert "$0.042" in footer
+
+    def test_footer_no_cost_when_zero(self) -> None:
+        snap = self._make_snapshot(
+            token_usage=Usage(input_tokens=1000, output_tokens=200),
+        )
+        footer = format_response_footer(snap)
+        assert "$" not in footer
+
     def test_footer_is_italic(self) -> None:
         snap = self._make_snapshot()
         footer = format_response_footer(snap)
@@ -445,6 +459,20 @@ class TestFormatStatusLine:
         snap = self._make_snapshot(tool_calls_made=0)
         line = format_status_line(snap, 1.0)
         assert "call" not in line
+
+    def test_shows_cost_when_nonzero(self) -> None:
+        snap = self._make_snapshot(
+            token_usage=Usage(input_tokens=1000, output_tokens=200, cost_usd=0.123),
+        )
+        line = format_status_line(snap, 2.0)
+        assert "$0.123" in line
+
+    def test_no_cost_when_zero(self) -> None:
+        snap = self._make_snapshot(
+            token_usage=Usage(input_tokens=1000, output_tokens=200),
+        )
+        line = format_status_line(snap, 2.0)
+        assert "$" not in line
 
     def test_is_italic(self) -> None:
         snap = self._make_snapshot()

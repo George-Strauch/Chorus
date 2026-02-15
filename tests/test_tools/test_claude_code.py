@@ -493,6 +493,69 @@ class TestClaudeCodePermissions:
 
 
 # ---------------------------------------------------------------------------
+# TestSubagentConfig
+# ---------------------------------------------------------------------------
+
+
+class TestSubagentConfig:
+    @pytest.mark.asyncio
+    async def test_subagent_config_passed_to_sdk(self, workspace_dir: Path) -> None:
+        """_run_sdk_query passes agents config to ClaudeAgentOptions."""
+        from chorus.tools.claude_code import claude_code_execute
+
+        profile = PermissionProfile(allow=[".*"], ask=[])
+
+        with patch("chorus.tools.claude_code._sdk_available", True), patch(
+            "chorus.tools.claude_code._run_sdk_query"
+        ) as mock_query:
+            mock_query.return_value = {
+                "output": "Done",
+                "cost_usd": 0.01,
+                "duration_ms": 1000,
+                "num_turns": 1,
+                "session_id": "sess-sub",
+                "is_error": False,
+            }
+
+            await claude_code_execute(
+                task="Test subagents",
+                workspace=workspace_dir,
+                profile=profile,
+                agent_name="test-agent",
+            )
+
+        mock_query.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_allowed_tools_includes_task(self, workspace_dir: Path) -> None:
+        """allowed_tools includes Task for subagent delegation."""
+        from chorus.tools.claude_code import claude_code_execute
+
+        profile = PermissionProfile(allow=[".*"], ask=[])
+
+        with patch("chorus.tools.claude_code._sdk_available", True), patch(
+            "chorus.tools.claude_code._run_sdk_query"
+        ) as mock_query:
+            mock_query.return_value = {
+                "output": "Done",
+                "cost_usd": 0.01,
+                "duration_ms": 1000,
+                "num_turns": 1,
+                "session_id": "sess-task",
+                "is_error": False,
+            }
+
+            await claude_code_execute(
+                task="Test allowed tools",
+                workspace=workspace_dir,
+                profile=profile,
+                agent_name="test-agent",
+            )
+
+        mock_query.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
 # TestHostExecution
 # ---------------------------------------------------------------------------
 

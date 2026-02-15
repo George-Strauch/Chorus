@@ -200,6 +200,10 @@ class TestGlobalConfig:
         cfg = GlobalConfig.load(tmp_path / "config.json")
         assert cfg.idle_timeout == 1800
 
+    def test_global_config_max_iterations_default_is_40(self, tmp_path: Path) -> None:
+        cfg = GlobalConfig.load(tmp_path / "config.json")
+        assert cfg.max_tool_loop_iterations == 40
+
     def test_global_config_serialization_roundtrip(self, tmp_path: Path) -> None:
         config_path = tmp_path / "config.json"
         cfg = GlobalConfig(

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock
@@ -1075,6 +1076,387 @@ class TestToolLoopOnEvent:
         start_events = [e for e in events if e.type == ToolLoopEventType.TOOL_CALL_START]
         assert len(start_events) == 1
         assert start_events[0].tool_name == "my_tool"
+
+
+# ---------------------------------------------------------------------------
+# Parallel tool execution
+# ---------------------------------------------------------------------------
+
+
+class TestParallelToolExecution:
+    @pytest.mark.asyncio
+    async def test_parallel_reduces_wall_time(self, tmp_path: Path) -> None:
+        """Two slow tools run in parallel should take ~1x, not ~2x the time."""
+
+        async def slow_tool(arg: str) -> dict[str, Any]:
+            await asyncio.sleep(0.3)
+            return {"result": arg}
+
+        h1 = AsyncMock(side_effect=slow_tool)
+        h2 = AsyncMock(side_effect=slow_tool)
+        registry = _make_registry(("tool_a", h1), ("tool_b", h2))
+
+        provider = FakeProvider(
+            [
+                _tool_response(
+                    [
+                        ToolCall(id="tc_1", name="tool_a", arguments={"arg": "x"}),
+                        ToolCall(id="tc_2", name="tool_b", arguments={"arg": "y"}),
+                    ]
+                ),
+                _text_response("Both done."),
+            ]
+        )
+
+        ctx = _make_ctx(tmp_path)
+        import time
+        start = time.monotonic()
+        result = await run_tool_loop(
+            provider=provider,
+            messages=[{"role": "user", "content": "Do both"}],
+            tools=registry,
+            ctx=ctx,
+            system_prompt="",
+            model="test",
+        )
+        elapsed = time.monotonic() - start
+
+        assert result.content == "Both done."
+        assert result.tool_calls_made == 2
+        # If run in parallel, should take ~0.3s; sequential would be ~0.6s
+        assert elapsed < 0.55, f"Expected parallel execution, but took {elapsed:.2f}s"
+
+    @pytest.mark.asyncio
+    async def test_ask_permission_forces_sequential(self, tmp_path: Path) -> None:
+        """Tools with ASK permission fall back to sequential execution."""
+
+        async def slow_tool(arg: str) -> dict[str, Any]:
+            await asyncio.sleep(0.1)
+            return {"result": arg}
+
+        h1 = AsyncMock(side_effect=slow_tool)
+        h2 = AsyncMock(side_effect=slow_tool)
+        registry = _make_registry(("tool_a", h1), ("tool_b", h2))
+
+        provider = FakeProvider(
+            [
+                _tool_response(
+                    [
+                        ToolCall(id="tc_1", name="tool_a", arguments={"arg": "x"}),
+                        ToolCall(id="tc_2", name="tool_b", arguments={"arg": "y"}),
+                    ]
+                ),
+                _text_response("Both done."),
+            ]
+        )
+
+        ctx = _make_ctx(tmp_path)
+        ctx.profile = _ask_profile()
+        ask_callback = AsyncMock(return_value=True)
+
+        result = await run_tool_loop(
+            provider=provider,
+            messages=[{"role": "user", "content": "Do both"}],
+            tools=registry,
+            ctx=ctx,
+            system_prompt="",
+            model="test",
+            ask_callback=ask_callback,
+        )
+
+        assert result.content == "Both done."
+        assert result.tool_calls_made == 2
+        # Should have asked for each tool
+        assert ask_callback.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_results_appended_in_order(self, tmp_path: Path) -> None:
+        """Tool results must be in the same order as tool_calls, even with parallel."""
+
+        async def tool_a_handler(arg: str) -> dict[str, Any]:
+            await asyncio.sleep(0.2)  # tool_a is slower
+            return {"result": "from_a"}
+
+        async def tool_b_handler(arg: str) -> dict[str, Any]:
+            await asyncio.sleep(0.01)  # tool_b is faster
+            return {"result": "from_b"}
+
+        h1 = AsyncMock(side_effect=tool_a_handler)
+        h2 = AsyncMock(side_effect=tool_b_handler)
+        registry = _make_registry(("tool_a", h1), ("tool_b", h2))
+
+        provider = FakeProvider(
+            [
+                _tool_response(
+                    [
+                        ToolCall(id="tc_1", name="tool_a", arguments={"arg": "x"}),
+                        ToolCall(id="tc_2", name="tool_b", arguments={"arg": "y"}),
+                    ]
+                ),
+                _text_response("Done."),
+            ]
+        )
+
+        ctx = _make_ctx(tmp_path)
+        await run_tool_loop(
+            provider=provider,
+            messages=[{"role": "user", "content": "Do both"}],
+            tools=registry,
+            ctx=ctx,
+            system_prompt="",
+            model="test",
+        )
+
+        # Check that tool results appear in original call order
+        second_call_msgs = provider.call_log[1]["messages"]
+        tool_results = [m for m in second_call_msgs if m.get("role") == "tool"]
+        assert len(tool_results) == 2
+        assert tool_results[0]["tool_call_id"] == "tc_1"
+        assert tool_results[1]["tool_call_id"] == "tc_2"
+        assert "from_a" in tool_results[0]["content"]
+        assert "from_b" in tool_results[1]["content"]
+
+    @pytest.mark.asyncio
+    async def test_one_failure_doesnt_cancel_others(self, tmp_path: Path) -> None:
+        """return_exceptions=True ensures one failure doesn't kill the batch."""
+
+        async def fail_tool(arg: str) -> dict[str, Any]:
+            raise RuntimeError("tool_a exploded")
+
+        async def ok_tool(arg: str) -> dict[str, Any]:
+            await asyncio.sleep(0.05)
+            return {"result": "ok"}
+
+        h1 = AsyncMock(side_effect=fail_tool)
+        h2 = AsyncMock(side_effect=ok_tool)
+        registry = _make_registry(("tool_a", h1), ("tool_b", h2))
+
+        provider = FakeProvider(
+            [
+                _tool_response(
+                    [
+                        ToolCall(id="tc_1", name="tool_a", arguments={"arg": "x"}),
+                        ToolCall(id="tc_2", name="tool_b", arguments={"arg": "y"}),
+                    ]
+                ),
+                _text_response("Handled errors."),
+            ]
+        )
+
+        ctx = _make_ctx(tmp_path)
+        result = await run_tool_loop(
+            provider=provider,
+            messages=[{"role": "user", "content": "Do both"}],
+            tools=registry,
+            ctx=ctx,
+            system_prompt="",
+            model="test",
+        )
+
+        assert result.content == "Handled errors."
+        assert result.tool_calls_made == 2
+
+        # Both results should be in the second call
+        second_call_msgs = provider.call_log[1]["messages"]
+        tool_results = [m for m in second_call_msgs if m.get("role") == "tool"]
+        assert len(tool_results) == 2
+        # First result should contain the error
+        assert "error" in tool_results[0]["content"].lower()
+        # Second result should contain ok
+        assert "ok" in tool_results[1]["content"]
+
+    @pytest.mark.asyncio
+    async def test_events_fire_for_each_parallel_tool(self, tmp_path: Path) -> None:
+        """TOOL_CALL_START and TOOL_CALL_COMPLETE fire for each tool in parallel."""
+        h1 = AsyncMock(return_value={"ok": True})
+        h2 = AsyncMock(return_value={"ok": True})
+        registry = _make_registry(("tool_a", h1), ("tool_b", h2))
+
+        provider = FakeProvider(
+            [
+                _tool_response(
+                    [
+                        ToolCall(id="tc_1", name="tool_a", arguments={"arg": "x"}),
+                        ToolCall(id="tc_2", name="tool_b", arguments={"arg": "y"}),
+                    ]
+                ),
+                _text_response("Done."),
+            ]
+        )
+
+        events: list[ToolLoopEvent] = []
+
+        async def recorder(event: ToolLoopEvent) -> None:
+            events.append(event)
+
+        ctx = _make_ctx(tmp_path)
+        await run_tool_loop(
+            provider=provider,
+            messages=[{"role": "user", "content": "Do both"}],
+            tools=registry,
+            ctx=ctx,
+            system_prompt="",
+            model="test",
+            on_event=recorder,
+        )
+
+        # Should have START and COMPLETE for each tool
+        start_events = [e for e in events if e.type == ToolLoopEventType.TOOL_CALL_START]
+        complete_events = [e for e in events if e.type == ToolLoopEventType.TOOL_CALL_COMPLETE]
+        assert len(start_events) == 2
+        assert len(complete_events) == 2
+        tool_names = {e.tool_name for e in start_events}
+        assert tool_names == {"tool_a", "tool_b"}
+
+    @pytest.mark.asyncio
+    async def test_single_tool_stays_sequential(self, tmp_path: Path) -> None:
+        """Single tool call doesn't use parallel path."""
+        handler = AsyncMock(return_value={"ok": True})
+        registry = _make_registry(("my_tool", handler))
+
+        provider = FakeProvider(
+            [
+                _tool_response([ToolCall(id="tc_1", name="my_tool", arguments={"arg": "x"})]),
+                _text_response("Done."),
+            ]
+        )
+
+        ctx = _make_ctx(tmp_path)
+        result = await run_tool_loop(
+            provider=provider,
+            messages=[{"role": "user", "content": "Do it"}],
+            tools=registry,
+            ctx=ctx,
+            system_prompt="",
+            model="test",
+        )
+
+        assert result.content == "Done."
+        assert result.tool_calls_made == 1
+        handler.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Cost extraction from claude_code
+# ---------------------------------------------------------------------------
+
+
+class TestCostExtraction:
+    @pytest.mark.asyncio
+    async def test_claude_code_cost_extracted(self, tmp_path: Path) -> None:
+        """Cost from claude_code tool result is accumulated into total_usage."""
+        cc_result = json.dumps({
+            "task": "Create file",
+            "success": True,
+            "output": "Done",
+            "cost_usd": 0.05,
+            "duration_ms": 5000,
+            "num_turns": 3,
+            "error": None,
+            "session_id": "sess-1",
+        })
+
+        handler = AsyncMock(return_value=cc_result)
+        registry = ToolRegistry()
+        registry.register(
+            ToolDefinition(
+                name="claude_code",
+                description="Claude Code SDK",
+                parameters={
+                    "type": "object",
+                    "properties": {"task": {"type": "string"}},
+                    "required": ["task"],
+                },
+                handler=handler,
+            )
+        )
+
+        provider = FakeProvider(
+            [
+                _tool_response(
+                    [ToolCall(id="tc_1", name="claude_code", arguments={"task": "do stuff"})]
+                ),
+                _text_response("Done."),
+            ]
+        )
+
+        ctx = _make_ctx(tmp_path)
+        result = await run_tool_loop(
+            provider=provider,
+            messages=[{"role": "user", "content": "Use claude code"}],
+            tools=registry,
+            ctx=ctx,
+            system_prompt="",
+            model="test",
+        )
+
+        assert result.total_usage.cost_usd == pytest.approx(0.05)
+
+    @pytest.mark.asyncio
+    async def test_non_claude_code_tool_no_cost(self, tmp_path: Path) -> None:
+        """Non-claude_code tools don't add cost."""
+        handler = AsyncMock(return_value=json.dumps({"cost_usd": 0.99}))
+        registry = _make_registry(("my_tool", handler))
+
+        provider = FakeProvider(
+            [
+                _tool_response(
+                    [ToolCall(id="tc_1", name="my_tool", arguments={"arg": "x"})]
+                ),
+                _text_response("Done."),
+            ]
+        )
+
+        ctx = _make_ctx(tmp_path)
+        result = await run_tool_loop(
+            provider=provider,
+            messages=[{"role": "user", "content": "Do it"}],
+            tools=registry,
+            ctx=ctx,
+            system_prompt="",
+            model="test",
+        )
+
+        assert result.total_usage.cost_usd == 0.0
+
+    @pytest.mark.asyncio
+    async def test_claude_code_cost_invalid_json_no_crash(self, tmp_path: Path) -> None:
+        """Invalid JSON from claude_code doesn't crash — cost is 0."""
+        handler = AsyncMock(return_value="not json at all")
+        registry = ToolRegistry()
+        registry.register(
+            ToolDefinition(
+                name="claude_code",
+                description="Claude Code SDK",
+                parameters={
+                    "type": "object",
+                    "properties": {"task": {"type": "string"}},
+                    "required": ["task"],
+                },
+                handler=handler,
+            )
+        )
+
+        provider = FakeProvider(
+            [
+                _tool_response(
+                    [ToolCall(id="tc_1", name="claude_code", arguments={"task": "do stuff"})]
+                ),
+                _text_response("Done."),
+            ]
+        )
+
+        ctx = _make_ctx(tmp_path)
+        result = await run_tool_loop(
+            provider=provider,
+            messages=[{"role": "user", "content": "Use claude code"}],
+            tools=registry,
+            ctx=ctx,
+            system_prompt="",
+            model="test",
+        )
+
+        assert result.total_usage.cost_usd == 0.0
 
 
 # ---------------------------------------------------------------------------

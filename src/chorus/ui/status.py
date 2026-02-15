@@ -49,7 +49,7 @@ class StatusSnapshot:
 def format_response_footer(snapshot: StatusSnapshot) -> str:
     """Build the italic footer line for a completed response.
 
-    Format: *branch #N · X steps · 1,234 in / 567 out · 12.5s*
+    Format: *branch #N · X steps · 1,234 in / 567 out · $0.042 · 12.5s*
     """
     elapsed_s = snapshot.elapsed_ms / 1000
     tok_in = f"{snapshot.token_usage.input_tokens:,}"
@@ -62,8 +62,10 @@ def format_response_footer(snapshot: StatusSnapshot) -> str:
         f"branch #{snapshot.thread_id}",
         f"{snapshot.step_number} steps",
         f"{tok_in} in / {tok_out} out",
-        f"{elapsed_s:.1f}s",
     ]
+    if snapshot.token_usage.cost_usd > 0:
+        parts.append(f"${snapshot.token_usage.cost_usd:.3f}")
+    parts.append(f"{elapsed_s:.1f}s")
     return "*" + " \u00b7 ".join(parts) + "*"
 
 
@@ -159,6 +161,8 @@ def format_status_line(snapshot: StatusSnapshot, elapsed_s: float) -> str:
     if cached > 0:
         tok_in += f" ({cached:,} cached)"
     parts.append(f"{tok_in} in / {tok_out} out")
+    if snapshot.token_usage.cost_usd > 0:
+        parts.append(f"${snapshot.token_usage.cost_usd:.3f}")
     if snapshot.tool_calls_made > 0:
         n = snapshot.tool_calls_made
         parts.append(f"{n} call{'s' if n != 1 else ''}")

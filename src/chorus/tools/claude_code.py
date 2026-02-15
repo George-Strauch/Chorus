@@ -107,16 +107,31 @@ async def _run_sdk_query(
     Returns a dict with output, cost_usd, duration_ms, num_turns, session_id, is_error.
     """
     from claude_agent_sdk import (
+        AgentDefinition,
         AssistantMessage,
         ClaudeAgentOptions,
         ResultMessage,
         query,
     )
 
+    # Configure a cheap Haiku subagent for read-only research tasks
+    agents = {
+        "researcher": AgentDefinition(
+            description=(
+                "Fast, cheap agent for reading files, searching codebases, "
+                "listing directories, running simple bash commands, and gathering info."
+            ),
+            prompt="You are a fast researcher. Read files, search code, run commands.",
+            tools=["Read", "Glob", "Grep", "Bash"],
+            model="haiku",
+        ),
+    }
+
     options_kwargs: dict[str, Any] = {
         "cwd": str(cwd),
         "permission_mode": "acceptEdits",
-        "allowed_tools": ["Read", "Write", "Edit", "Bash", "Glob", "Grep"],
+        "allowed_tools": ["Read", "Write", "Edit", "Bash", "Glob", "Grep", "Task"],
+        "agents": agents,
     }
     if model is not None:
         options_kwargs["model"] = model

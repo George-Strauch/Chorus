@@ -36,6 +36,7 @@ class Usage:
     output_tokens: int
     cache_creation_input_tokens: int = 0
     cache_read_input_tokens: int = 0
+    cost_usd: float = 0.0
 
     def __add__(self, other: Usage) -> Usage:
         return Usage(
@@ -47,6 +48,7 @@ class Usage:
             cache_read_input_tokens=(
                 self.cache_read_input_tokens + other.cache_read_input_tokens
             ),
+            cost_usd=self.cost_usd + other.cost_usd,
         )
 
 

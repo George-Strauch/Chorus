@@ -197,6 +197,23 @@ class TestUsage:
         assert total.cache_creation_input_tokens == 150
         assert total.cache_read_input_tokens == 500
 
+    def test_cost_usd_defaults_zero(self) -> None:
+        u = Usage(input_tokens=10, output_tokens=5)
+        assert u.cost_usd == 0.0
+
+    def test_cost_usd_add(self) -> None:
+        u1 = Usage(input_tokens=10, output_tokens=5, cost_usd=0.05)
+        u2 = Usage(input_tokens=20, output_tokens=10, cost_usd=0.03)
+        total = u1 + u2
+        assert total.cost_usd == pytest.approx(0.08)
+
+    def test_cost_usd_backward_compat(self) -> None:
+        """Usage without cost_usd still works with __add__."""
+        u1 = Usage(input_tokens=10, output_tokens=5)
+        u2 = Usage(input_tokens=20, output_tokens=10)
+        total = u1 + u2
+        assert total.cost_usd == 0.0
+
 
 # ---------------------------------------------------------------------------
 # Tool schema translation

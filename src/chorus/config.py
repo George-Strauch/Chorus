@@ -81,7 +81,7 @@ class GlobalConfig:
     default_model: str | None = None
     default_permissions: str = "standard"
     idle_timeout: int = 1800
-    max_tool_loop_iterations: int = 25
+    max_tool_loop_iterations: int = 40
     max_bash_timeout: int = 120
 
     @classmethod
@@ -93,7 +93,7 @@ class GlobalConfig:
                 default_model=data.get("default_model"),
                 default_permissions=data.get("default_permissions", "standard"),
                 idle_timeout=data.get("idle_timeout", 1800),
-                max_tool_loop_iterations=data.get("max_tool_loop_iterations", 25),
+                max_tool_loop_iterations=data.get("max_tool_loop_iterations", 40),
                 max_bash_timeout=data.get("max_bash_timeout", 120),
             )
         cfg = cls()

@@ -479,44 +479,84 @@ async def run_tool_loop(
             assistant_msg["_anthropic_content"] = response._raw_content
         working_messages.append(assistant_msg)
 
-        # Execute each tool call
-        for tc in response.tool_calls:
-            await _fire_event(
-                on_event,
-                ToolLoopEvent(
-                    type=ToolLoopEventType.TOOL_CALL_START,
-                    iteration=iteration,
-                    tool_name=tc.name,
-                    tool_arguments=tc.arguments,
-                    tool_calls_made=total_tool_calls,
-                    tools_used=list(tools_used),
-                    total_usage=total_usage,
-                ),
+        # Execute tool calls — parallel when safe, sequential otherwise
+        use_parallel = len(response.tool_calls) > 1 and _can_run_parallel(
+            response.tool_calls, tools, ctx
+        )
+
+        if use_parallel:
+            results = await _run_parallel(
+                response.tool_calls, tools, ctx, ask_callback,
+                on_event, iteration, total_tool_calls, list(tools_used), total_usage,
             )
 
-            result_content = await _handle_tool_call(tc, tools, ctx, ask_callback)
-            working_messages.append(
-                {
-                    "role": "tool",
-                    "tool_call_id": tc.id,
-                    "content": result_content,
-                }
-            )
-            total_tool_calls += 1
-            if tc.name not in tools_used:
-                tools_used.append(tc.name)
+            for tc, result in zip(response.tool_calls, results, strict=True):
+                if isinstance(result, BaseException):
+                    result_content = json.dumps(
+                        {"error": f"{type(result).__name__}: {result}"}
+                    )
+                    tool_cost = 0.0
+                else:
+                    result_content, tool_cost, _ = result
+                working_messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tc.id,
+                        "content": result_content,
+                    }
+                )
+                total_tool_calls += 1
+                if tc.name not in tools_used:
+                    tools_used.append(tc.name)
+                if tool_cost > 0:
+                    total_usage = total_usage + Usage(
+                        input_tokens=0, output_tokens=0, cost_usd=tool_cost
+                    )
+        else:
+            # Sequential execution
+            for tc in response.tool_calls:
+                await _fire_event(
+                    on_event,
+                    ToolLoopEvent(
+                        type=ToolLoopEventType.TOOL_CALL_START,
+                        iteration=iteration,
+                        tool_name=tc.name,
+                        tool_arguments=tc.arguments,
+                        tool_calls_made=total_tool_calls,
+                        tools_used=list(tools_used),
+                        total_usage=total_usage,
+                    ),
+                )
 
-            await _fire_event(
-                on_event,
-                ToolLoopEvent(
-                    type=ToolLoopEventType.TOOL_CALL_COMPLETE,
-                    iteration=iteration,
-                    tool_name=tc.name,
-                    tool_calls_made=total_tool_calls,
-                    tools_used=list(tools_used),
-                    total_usage=total_usage,
-                ),
-            )
+                result_content, tool_cost = await _handle_tool_call(
+                    tc, tools, ctx, ask_callback
+                )
+                working_messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tc.id,
+                        "content": result_content,
+                    }
+                )
+                total_tool_calls += 1
+                if tc.name not in tools_used:
+                    tools_used.append(tc.name)
+                if tool_cost > 0:
+                    total_usage = total_usage + Usage(
+                        input_tokens=0, output_tokens=0, cost_usd=tool_cost
+                    )
+
+                await _fire_event(
+                    on_event,
+                    ToolLoopEvent(
+                        type=ToolLoopEventType.TOOL_CALL_COMPLETE,
+                        iteration=iteration,
+                        tool_name=tc.name,
+                        tool_calls_made=total_tool_calls,
+                        tools_used=list(tools_used),
+                        total_usage=total_usage,
+                    ),
+                )
 
     # Reached max iterations
     await _fire_event(
@@ -538,17 +578,84 @@ async def run_tool_loop(
     )
 
 
+async def _run_parallel(
+    tool_calls: list[ToolCall],
+    tools: ToolRegistry,
+    ctx: ToolExecutionContext,
+    ask_callback: Callable[[str, str], Awaitable[bool]] | None,
+    on_event: Callable[[ToolLoopEvent], Awaitable[None]] | None,
+    iteration: int,
+    tool_calls_made: int,
+    tools_used: list[str],
+    total_usage: Usage,
+) -> list[tuple[str, float, str] | BaseException]:
+    """Run multiple tool calls concurrently via asyncio.gather."""
+
+    async def _run_one(tc: ToolCall) -> tuple[str, float, str]:
+        await _fire_event(
+            on_event,
+            ToolLoopEvent(
+                type=ToolLoopEventType.TOOL_CALL_START,
+                iteration=iteration,
+                tool_name=tc.name,
+                tool_arguments=tc.arguments,
+                tool_calls_made=tool_calls_made,
+                tools_used=list(tools_used),
+                total_usage=total_usage,
+            ),
+        )
+        result_content, cost = await _handle_tool_call(tc, tools, ctx, ask_callback)
+        await _fire_event(
+            on_event,
+            ToolLoopEvent(
+                type=ToolLoopEventType.TOOL_CALL_COMPLETE,
+                iteration=iteration,
+                tool_name=tc.name,
+                tool_calls_made=tool_calls_made,
+                tools_used=list(tools_used),
+                total_usage=total_usage,
+            ),
+        )
+        return result_content, cost, tc.name
+
+    return await asyncio.gather(
+        *[_run_one(tc) for tc in tool_calls],
+        return_exceptions=True,
+    )
+
+
+def _can_run_parallel(
+    tool_calls: list[ToolCall],
+    tools: ToolRegistry,
+    ctx: ToolExecutionContext,
+) -> bool:
+    """Check whether a batch of tool calls can safely run in parallel.
+
+    Returns False if any tool call would require ASK permission (we can't
+    show multiple permission prompts simultaneously in Discord).
+    """
+    for tc in tool_calls:
+        tool = tools.get(tc.name)
+        if tool is None:
+            continue  # Unknown tools will error; that's fine in parallel
+        action = _build_action_string(tc.name, tc.arguments)
+        perm = check(action, ctx.profile)
+        if perm is PermissionResult.ASK:
+            return False
+    return True
+
+
 async def _handle_tool_call(
     tc: ToolCall,
     tools: ToolRegistry,
     ctx: ToolExecutionContext,
     ask_callback: Callable[[str, str], Awaitable[bool]] | None,
-) -> str:
-    """Handle a single tool call: permission check → execute → return result string."""
+) -> tuple[str, float]:
+    """Handle a single tool call: permission check → execute → return (result, cost_usd)."""
     # Look up tool
     tool = tools.get(tc.name)
     if tool is None:
-        return json.dumps({"error": f"Unknown tool: {tc.name}"})
+        return json.dumps({"error": f"Unknown tool: {tc.name}"}), 0.0
 
     # Permission check
     action = _build_action_string(tc.name, tc.arguments)
@@ -556,22 +663,36 @@ async def _handle_tool_call(
 
     if perm is PermissionResult.DENY:
         logger.info("Permission denied for %s: %s", tc.name, action)
-        return json.dumps({"error": f"Permission denied: {action}"})
+        return json.dumps({"error": f"Permission denied: {action}"}), 0.0
 
     if perm is PermissionResult.ASK:
         if ask_callback is None:
             logger.info("ASK permission with no callback for %s, denying", tc.name)
-            return json.dumps({"error": f"Permission requires approval (no callback): {action}"})
+            return (
+                json.dumps({"error": f"Permission requires approval (no callback): {action}"}),
+                0.0,
+            )
 
         args_str = json.dumps(tc.arguments)
         approved = await ask_callback(tc.name, args_str)
         if not approved:
             logger.info("User denied %s: %s", tc.name, action)
-            return json.dumps({"error": f"User declined: {action}"})
+            return json.dumps({"error": f"User declined: {action}"}), 0.0
 
     # Execute tool
     try:
-        return await _execute_tool(tool, tc.arguments, ctx)
+        result_str = await _execute_tool(tool, tc.arguments, ctx)
     except Exception as exc:
         logger.exception("Tool %s raised an error", tc.name)
-        return json.dumps({"error": f"{type(exc).__name__}: {exc}"})
+        return json.dumps({"error": f"{type(exc).__name__}: {exc}"}), 0.0
+
+    # Extract cost from claude_code results
+    cost_usd = 0.0
+    if tc.name == "claude_code":
+        try:
+            result_data = json.loads(result_str)
+            cost_usd = result_data.get("cost_usd") or 0.0
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+    return result_str, cost_usd
