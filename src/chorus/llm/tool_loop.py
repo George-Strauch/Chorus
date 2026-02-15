@@ -32,6 +32,12 @@ if TYPE_CHECKING:
     from chorus.permissions.engine import PermissionProfile
     from chorus.tools.registry import ToolDefinition, ToolRegistry
 
+# Parameters that are injected by _execute_tool, not provided by the LLM.
+_CONTEXT_INJECTED_PARAMS = frozenset({
+    "workspace", "profile", "agent_name", "chorus_home",
+    "is_admin", "db", "host_execution",
+})
+
 logger = logging.getLogger("chorus.llm.tool_loop")
 
 # ---------------------------------------------------------------------------
@@ -251,6 +257,51 @@ async def _fire_event(
 # ---------------------------------------------------------------------------
 
 
+def _is_error_result(content: str) -> bool:
+    """Check if a tool result string represents an error (JSON with "error" key)."""
+    try:
+        data = json.loads(content)
+        return isinstance(data, dict) and "error" in data
+    except (json.JSONDecodeError, TypeError):
+        return False
+
+
+def _validate_tool_arguments(
+    tool: ToolDefinition,
+    arguments: dict[str, Any],
+) -> str | None:
+    """Pre-validate that all required schema arguments are present.
+
+    Returns ``None`` if valid, or a descriptive error message listing
+    the expected parameters when required arguments are missing.
+    Context-injected parameters (workspace, profile, etc.) are excluded
+    from the check since the LLM is not expected to provide them.
+    """
+    schema = tool.parameters
+    required = schema.get("required", [])
+    properties = schema.get("properties", {})
+
+    # Filter out context-injected params — the LLM shouldn't provide these
+    required_from_llm = [r for r in required if r not in _CONTEXT_INJECTED_PARAMS]
+
+    missing = [r for r in required_from_llm if r not in arguments]
+    if not missing:
+        return None
+
+    # Build a helpful error listing all expected parameters
+    lines = [f"Missing required argument(s): {', '.join(repr(m) for m in missing)}."]
+    lines.append(f"Tool '{tool.name}' expects:")
+    for param_name in required_from_llm:
+        prop = properties.get(param_name, {})
+        ptype = prop.get("type", "any")
+        desc = prop.get("description", "")
+        req_marker = "(required)"
+        desc_part = f" — {desc}" if desc else ""
+        lines.append(f"  - {param_name}: {ptype} {req_marker}{desc_part}")
+
+    return "\n".join(lines)
+
+
 async def _execute_tool(
     tool: ToolDefinition,
     arguments: dict[str, Any],
@@ -384,6 +435,8 @@ async def run_tool_loop(
     total_usage = Usage(input_tokens=0, output_tokens=0)
     total_tool_calls = 0
     tools_used: list[str] = []
+    consecutive_errors = 0
+    max_consecutive_errors = 5
 
     for iteration in range(1, max_iterations + 1):
         # Drain injected messages from the queue before each LLM call
@@ -490,14 +543,19 @@ async def run_tool_loop(
                 on_event, iteration, total_tool_calls, list(tools_used), total_usage,
             )
 
+            batch_errors = 0
             for tc, result in zip(response.tool_calls, results, strict=True):
                 if isinstance(result, BaseException):
                     result_content = json.dumps(
                         {"error": f"{type(result).__name__}: {result}"}
                     )
                     tool_cost = 0.0
+                    batch_errors += 1
                 else:
                     result_content, tool_cost, _ = result
+                    # Check if the result itself is an error
+                    if _is_error_result(result_content):
+                        batch_errors += 1
                 working_messages.append(
                     {
                         "role": "tool",
@@ -512,6 +570,12 @@ async def run_tool_loop(
                     total_usage = total_usage + Usage(
                         input_tokens=0, output_tokens=0, cost_usd=tool_cost
                     )
+
+            # Circuit breaker: if ALL calls in the batch failed, count batch size
+            if batch_errors == len(response.tool_calls):
+                consecutive_errors += batch_errors
+            else:
+                consecutive_errors = 0
         else:
             # Sequential execution
             for tc in response.tool_calls:
@@ -546,6 +610,12 @@ async def run_tool_loop(
                         input_tokens=0, output_tokens=0, cost_usd=tool_cost
                     )
 
+                # Circuit breaker tracking
+                if _is_error_result(result_content):
+                    consecutive_errors += 1
+                else:
+                    consecutive_errors = 0
+
                 await _fire_event(
                     on_event,
                     ToolLoopEvent(
@@ -557,6 +627,33 @@ async def run_tool_loop(
                         total_usage=total_usage,
                     ),
                 )
+
+        # Circuit breaker: stop if too many consecutive errors
+        if consecutive_errors >= max_consecutive_errors:
+            msg = (
+                f"Stopped after {consecutive_errors} consecutive tool errors. "
+                f"The LLM may be sending invalid arguments repeatedly. "
+                f"Total tool calls: {total_tool_calls}, iterations: {iteration}."
+            )
+            logger.warning("Circuit breaker tripped: %s", msg)
+            await _fire_event(
+                on_event,
+                ToolLoopEvent(
+                    type=ToolLoopEventType.LOOP_COMPLETE,
+                    iteration=iteration,
+                    total_usage=total_usage,
+                    tool_calls_made=total_tool_calls,
+                    tools_used=list(tools_used),
+                    content_preview=msg[:200],
+                ),
+            )
+            return ToolLoopResult(
+                content=msg,
+                messages=working_messages,
+                total_usage=total_usage,
+                iterations=iteration,
+                tool_calls_made=total_tool_calls,
+            )
 
     # Reached max iterations
     await _fire_event(
@@ -679,9 +776,27 @@ async def _handle_tool_call(
             logger.info("User denied %s: %s", tc.name, action)
             return json.dumps({"error": f"User declined: {action}"}), 0.0
 
+    # Pre-validate required arguments
+    validation_error = _validate_tool_arguments(tool, tc.arguments)
+    if validation_error is not None:
+        logger.warning("Argument validation failed for %s: %s", tc.name, validation_error)
+        return json.dumps({"error": validation_error}), 0.0
+
     # Execute tool
     try:
         result_str = await _execute_tool(tool, tc.arguments, ctx)
+    except TypeError as exc:
+        # Provide detailed info about provided vs expected arguments
+        sig = inspect.signature(tool.handler)
+        expected = list(sig.parameters.keys())
+        provided = list(tc.arguments.keys())
+        msg = (
+            f"TypeError calling '{tc.name}': {exc}\n"
+            f"  Provided arguments: {provided}\n"
+            f"  Expected parameters: {expected}"
+        )
+        logger.exception("Tool %s TypeError", tc.name)
+        return json.dumps({"error": msg}), 0.0
     except Exception as exc:
         logger.exception("Tool %s raised an error", tc.name)
         return json.dumps({"error": f"{type(exc).__name__}: {exc}"}), 0.0

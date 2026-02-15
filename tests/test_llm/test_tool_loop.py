@@ -16,7 +16,9 @@ from chorus.llm.tool_loop import (
     ToolLoopEvent,
     ToolLoopEventType,
     ToolLoopResult,
+    _is_error_result,
     _truncate_tool_loop_messages,
+    _validate_tool_arguments,
     run_tool_loop,
 )
 from chorus.permissions.engine import PermissionProfile
@@ -2019,3 +2021,340 @@ class TestToolLoopMidLoopTruncation:
         # Loop should complete successfully (truncation prevented oversize context)
         assert result.content == "Done despite big result."
         assert result.iterations == 2
+
+
+# ---------------------------------------------------------------------------
+# Argument validation
+# ---------------------------------------------------------------------------
+
+
+class TestValidateToolArguments:
+    def _make_tool(
+        self,
+        name: str = "create_file",
+        required: list[str] | None = None,
+        properties: dict[str, Any] | None = None,
+    ) -> ToolDefinition:
+        if properties is None:
+            properties = {
+                "path": {"type": "string", "description": "File path"},
+                "content": {"type": "string", "description": "File content (UTF-8)"},
+            }
+        if required is None:
+            required = list(properties.keys())
+        return ToolDefinition(
+            name=name,
+            description=f"Tool {name}",
+            parameters={
+                "type": "object",
+                "properties": properties,
+                "required": required,
+            },
+            handler=AsyncMock(return_value="ok"),
+        )
+
+    def test_all_required_present(self) -> None:
+        tool = self._make_tool()
+        result = _validate_tool_arguments(tool, {"path": "a.txt", "content": "hello"})
+        assert result is None
+
+    def test_missing_required_arg(self) -> None:
+        tool = self._make_tool()
+        result = _validate_tool_arguments(tool, {"path": "a.txt"})
+        assert result is not None
+        assert "'content'" in result
+        assert "create_file" in result
+        assert "required" in result.lower()
+
+    def test_missing_multiple_required_args(self) -> None:
+        tool = self._make_tool()
+        result = _validate_tool_arguments(tool, {})
+        assert result is not None
+        assert "'path'" in result
+        assert "'content'" in result
+
+    def test_context_params_excluded(self) -> None:
+        """Context-injected params (workspace, profile, etc.) shouldn't be required from LLM."""
+        tool = ToolDefinition(
+            name="create_file",
+            description="Create a file",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "File path"},
+                    "workspace": {"type": "string"},
+                },
+                "required": ["path", "workspace"],
+            },
+            handler=AsyncMock(return_value="ok"),
+        )
+        # Only providing "path" — "workspace" is context-injected and should be skipped
+        result = _validate_tool_arguments(tool, {"path": "a.txt"})
+        assert result is None
+
+    def test_no_required_field(self) -> None:
+        """Schema with no 'required' key should pass validation."""
+        tool = ToolDefinition(
+            name="optional_tool",
+            description="All optional",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "arg": {"type": "string"},
+                },
+            },
+            handler=AsyncMock(return_value="ok"),
+        )
+        result = _validate_tool_arguments(tool, {})
+        assert result is None
+
+    def test_error_includes_type_and_description(self) -> None:
+        tool = self._make_tool()
+        result = _validate_tool_arguments(tool, {"path": "a.txt"})
+        assert result is not None
+        assert "string" in result  # type info
+        assert "File content (UTF-8)" in result  # description
+
+
+# ---------------------------------------------------------------------------
+# Circuit breaker
+# ---------------------------------------------------------------------------
+
+
+class TestCircuitBreaker:
+    @pytest.mark.asyncio
+    async def test_trips_after_consecutive_errors(self, tmp_path: Path) -> None:
+        """Loop stops early after 5 consecutive tool errors."""
+        handler = AsyncMock(side_effect=RuntimeError("always fails"))
+        registry = _make_registry(("failing_tool", handler))
+
+        # Provider always returns a tool call — loop would normally run max_iterations
+        responses = [
+            _tool_response(
+                [ToolCall(id=f"tc_{i}", name="failing_tool", arguments={"arg": str(i)})]
+            )
+            for i in range(20)
+        ]
+        provider = FakeProvider(responses)
+
+        ctx = _make_ctx(tmp_path)
+        result = await run_tool_loop(
+            provider=provider,
+            messages=[{"role": "user", "content": "Do it"}],
+            tools=registry,
+            ctx=ctx,
+            system_prompt="",
+            model="test",
+            max_iterations=20,
+        )
+
+        assert "consecutive tool errors" in (result.content or "").lower()
+        assert result.tool_calls_made == 5
+        assert result.iterations < 20
+
+    @pytest.mark.asyncio
+    async def test_resets_on_success(self, tmp_path: Path) -> None:
+        """A successful call resets the consecutive error counter."""
+        call_count = 0
+
+        async def sometimes_fails(arg: str) -> dict[str, Any]:
+            nonlocal call_count
+            call_count += 1
+            # Fail 4 times, succeed once, fail 4 more — never hits 5 consecutive
+            if call_count % 5 == 0:
+                return {"result": "ok"}
+            raise RuntimeError("fail")
+
+        handler = AsyncMock(side_effect=sometimes_fails)
+        registry = _make_registry(("flaky_tool", handler))
+
+        responses = [
+            _tool_response(
+                [ToolCall(id=f"tc_{i}", name="flaky_tool", arguments={"arg": str(i)})]
+            )
+            for i in range(12)
+        ]
+        responses.append(_text_response("Done."))
+        provider = FakeProvider(responses)
+
+        ctx = _make_ctx(tmp_path)
+        result = await run_tool_loop(
+            provider=provider,
+            messages=[{"role": "user", "content": "Do it"}],
+            tools=registry,
+            ctx=ctx,
+            system_prompt="",
+            model="test",
+            max_iterations=15,
+        )
+
+        # Should NOT have tripped the circuit breaker
+        assert "consecutive tool errors" not in (result.content or "").lower()
+
+    @pytest.mark.asyncio
+    async def test_fires_loop_complete_event(self, tmp_path: Path) -> None:
+        """Circuit breaker fires LOOP_COMPLETE event when it trips."""
+        handler = AsyncMock(side_effect=RuntimeError("fail"))
+        registry = _make_registry(("failing_tool", handler))
+
+        responses = [
+            _tool_response(
+                [ToolCall(id=f"tc_{i}", name="failing_tool", arguments={"arg": str(i)})]
+            )
+            for i in range(10)
+        ]
+        provider = FakeProvider(responses)
+
+        events: list[ToolLoopEvent] = []
+
+        async def recorder(event: ToolLoopEvent) -> None:
+            events.append(event)
+
+        ctx = _make_ctx(tmp_path)
+        await run_tool_loop(
+            provider=provider,
+            messages=[{"role": "user", "content": "Do it"}],
+            tools=registry,
+            ctx=ctx,
+            system_prompt="",
+            model="test",
+            max_iterations=10,
+            on_event=recorder,
+        )
+
+        loop_complete = [e for e in events if e.type == ToolLoopEventType.LOOP_COMPLETE]
+        assert len(loop_complete) == 1
+
+    @pytest.mark.asyncio
+    async def test_circuit_breaker_with_validation_errors(self, tmp_path: Path) -> None:
+        """Validation errors (missing args) also trip the circuit breaker."""
+        handler = AsyncMock(return_value={"ok": True})
+        registry = ToolRegistry()
+        registry.register(
+            ToolDefinition(
+                name="create_file",
+                description="Create file",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "File path"},
+                        "content": {"type": "string", "description": "Content"},
+                    },
+                    "required": ["path", "content"],
+                },
+                handler=handler,
+            )
+        )
+
+        # LLM keeps sending incomplete arguments — missing 'content'
+        responses = [
+            _tool_response(
+                [ToolCall(id=f"tc_{i}", name="create_file", arguments={"path": "a.txt"})]
+            )
+            for i in range(10)
+        ]
+        provider = FakeProvider(responses)
+
+        ctx = _make_ctx(tmp_path)
+        result = await run_tool_loop(
+            provider=provider,
+            messages=[{"role": "user", "content": "Create file"}],
+            tools=registry,
+            ctx=ctx,
+            system_prompt="",
+            model="test",
+            max_iterations=10,
+        )
+
+        assert "consecutive tool errors" in (result.content or "").lower()
+        handler.assert_not_called()  # Validation should prevent execution
+
+
+# ---------------------------------------------------------------------------
+# TypeError messages
+# ---------------------------------------------------------------------------
+
+
+class TestTypeErrorMessages:
+    @pytest.mark.asyncio
+    async def test_typeerror_includes_provided_and_expected(self, tmp_path: Path) -> None:
+        """TypeError catch provides both provided and expected arg lists."""
+
+        async def strict_tool(*, path: str, content: str) -> dict[str, Any]:
+            # This will never be called — we'll force a TypeError via the handler
+            return {"ok": True}
+
+        async def raising_handler(path: str, content: str) -> dict[str, Any]:
+            raise TypeError("missing 1 required keyword-only argument: 'mode'")
+
+        registry = ToolRegistry()
+        registry.register(
+            ToolDefinition(
+                name="strict_tool",
+                description="Strict tool",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "File path"},
+                        "content": {"type": "string", "description": "Content"},
+                    },
+                    "required": ["path", "content"],
+                },
+                handler=raising_handler,
+            )
+        )
+
+        provider = FakeProvider(
+            [
+                _tool_response(
+                    [ToolCall(
+                        id="tc_1",
+                        name="strict_tool",
+                        arguments={"path": "a.txt", "content": "hello"},
+                    )]
+                ),
+                _text_response("Error handled."),
+            ]
+        )
+
+        ctx = _make_ctx(tmp_path)
+        await run_tool_loop(
+            provider=provider,
+            messages=[{"role": "user", "content": "Do it"}],
+            tools=registry,
+            ctx=ctx,
+            system_prompt="",
+            model="test",
+        )
+
+        # Check that the error fed back to LLM contains provided/expected info
+        second_call_msgs = provider.call_log[1]["messages"]
+        tool_results = [m for m in second_call_msgs if m.get("role") == "tool"]
+        assert len(tool_results) == 1
+        error_content = tool_results[0]["content"]
+        assert "Provided arguments" in error_content
+        assert "Expected parameters" in error_content
+        assert "path" in error_content
+        assert "content" in error_content
+
+
+# ---------------------------------------------------------------------------
+# _is_error_result helper
+# ---------------------------------------------------------------------------
+
+
+class TestIsErrorResult:
+    def test_json_with_error_key(self) -> None:
+        assert _is_error_result(json.dumps({"error": "something failed"})) is True
+
+    def test_json_without_error_key(self) -> None:
+        assert _is_error_result(json.dumps({"result": "ok"})) is False
+
+    def test_non_json_string(self) -> None:
+        assert _is_error_result("plain text output") is False
+
+    def test_empty_string(self) -> None:
+        assert _is_error_result("") is False
+
+    def test_json_array(self) -> None:
+        assert _is_error_result(json.dumps([{"error": "x"}])) is False
