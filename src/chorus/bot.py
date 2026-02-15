@@ -380,6 +380,11 @@ class ChorusBot(commands.Bot):
         """Build a ThreadRunner closure that runs the LLM tool loop."""
 
         async def runner(thread: ExecutionThread) -> None:
+            logger.info(
+                "[%s] Branch #%d started | model=%s",
+                agent.name, thread.id, agent.model or "default",
+            )
+
             # Resolve permission profile
             profile = get_preset(agent.permissions)
 
@@ -472,6 +477,37 @@ class ChorusBot(commands.Bot):
                 updates["tool_calls_made"] = event.tool_calls_made
                 updates["tools_used"] = list(event.tools_used)
                 updates["llm_iterations"] = event.iteration
+
+                # Log key events
+                if event.type == ToolLoopEventType.LLM_CALL_START:
+                    logger.info(
+                        "[%s:#%d] LLM call %d starting",
+                        agent.name, thread.id, event.iteration,
+                    )
+                elif event.type == ToolLoopEventType.LLM_CALL_COMPLETE:
+                    u = event.usage_delta
+                    tok = f"{u.input_tokens}in/{u.output_tokens}out" if u else "?"
+                    logger.info(
+                        "[%s:#%d] LLM call %d complete | %s",
+                        agent.name, thread.id, event.iteration, tok,
+                    )
+                elif event.type == ToolLoopEventType.TOOL_CALL_START and event.tool_name:
+                    args_preview = ""
+                    if event.tool_arguments:
+                        args_preview = str(event.tool_arguments)[:120]
+                    logger.info(
+                        "[%s:#%d] Tool: %s(%s)",
+                        agent.name, thread.id, event.tool_name, args_preview,
+                    )
+                elif event.type == ToolLoopEventType.LOOP_COMPLETE:
+                    u = event.total_usage
+                    cost = f" ${u.cost_usd:.3f}" if u and u.cost_usd > 0 else ""
+                    logger.info(
+                        "[%s:#%d] Loop complete | %d calls, %d iterations%s",
+                        agent.name, thread.id,
+                        event.tool_calls_made, event.iteration, cost,
+                    )
+
                 if event.type == ToolLoopEventType.TOOL_CALL_START and event.tool_name:
                     updates["current_step"] = f"Running {event.tool_name}"
                     updates["step_number"] = event.tool_calls_made + 1
