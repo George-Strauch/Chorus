@@ -509,10 +509,13 @@ def create_default_registry() -> ToolRegistry:
             ToolDefinition(
                 name="claude_code",
                 description=(
-                    "Delegate a coding task to Claude Code — use for creating and editing "
-                    "code files (.py, .js, .ts, .go, .rs, etc.). Provide a clear, detailed "
-                    "task description. For non-code files (.md, .txt, .json, .yaml), "
-                    "use create_file and str_replace instead."
+                    "Delegate a coding task to Claude Code — use ONLY for creating and "
+                    "editing code files (.py, .js, .ts, .go, .rs, etc.). Provide a clear, "
+                    "detailed task description. IMPORTANT: Do NOT use this tool to run or "
+                    "execute scripts — use the bash tool instead so the user can see live "
+                    "progress. Do NOT bundle 'edit + run' into a single claude_code call. "
+                    "For non-code files (.md, .txt, .json, .yaml), use create_file and "
+                    "str_replace instead."
                 ),
                 parameters={
                     "type": "object",
