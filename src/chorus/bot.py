@@ -51,6 +51,7 @@ class ChorusBot(commands.Bot):
     def __init__(self, config: BotConfig) -> None:
         self.config = config
         self.global_config = GlobalConfig()
+        self.start_time = datetime.now(UTC)
 
         # Thread and context management state (initialized early so on_message works pre-setup_hook)
         self._thread_managers: dict[str, ThreadManager] = {}

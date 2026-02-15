@@ -6,6 +6,7 @@ services:
         UID: ${HOST_UID:-1000}
         GID: ${HOST_GID:-1000}
         DOCKER_GID: ${DOCKER_GID:-999}
+        GIT_COMMIT: ${GIT_COMMIT:-unknown}
     env_file: .env
     volumes:
       - ${HOME}/.chorus-agents:/home/appuser/.chorus-agents

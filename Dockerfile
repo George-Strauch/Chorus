@@ -43,6 +43,8 @@ RUN groupadd -g ${GID} appuser 2>/dev/null || true \
     && chown -R appuser:appuser /home/appuser/.chorus-agents
 USER appuser
 
+ARG GIT_COMMIT=unknown
+ENV GIT_COMMIT=${GIT_COMMIT}
 ENV CHORUS_HOME=/home/appuser/.chorus-agents
 ENV CHORUS_TEMPLATE_DIR=/app/template
 ENV CHORUS_SCOPE_PATH=/mnt/host

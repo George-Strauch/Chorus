@@ -22,6 +22,13 @@ else
 fi
 
 echo "Using compose file: $COMPOSE_FILE"
+
+# Resolve git commit hash for the build context
+COMPOSE_DIR="$(dirname "$COMPOSE_FILE")"
+GIT_COMMIT="$(git -C "$COMPOSE_DIR" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+export GIT_COMMIT
+echo "Building from commit: $GIT_COMMIT"
+
 echo "Triggering rebuild — this container will restart..."
 nohup docker compose -f "$COMPOSE_FILE" up -d --build > /tmp/rebuild.log 2>&1 &
 echo "Rebuild started (PID $!). Container will restart shortly."
