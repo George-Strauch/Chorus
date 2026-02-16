@@ -27,6 +27,7 @@ fi
 
 # Host home mount (default: $HOME)
 export SCOPE_PATH="${SCOPE_PATH:-$HOME}"
+export HOST_USER="$(whoami)"
 
 echo "Starting Chorus..."
 echo "  UID=$HOST_UID  GID=$HOST_GID  DOCKER_GID=$DOCKER_GID"

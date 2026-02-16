@@ -144,6 +144,59 @@ def _targets_scope_path(command: str, workspace: Path, scope_path: Path | None) 
     return False
 
 
+def _can_nsenter() -> bool:
+    """Return True if we're in a container with host-exec support.
+
+    Requires ``pid: host``, ``privileged: true``, and the
+    ``HOST_SCOPE_PATH`` / ``HOST_USER`` env vars set by compose.
+    """
+    return bool(
+        os.environ.get("HOST_SCOPE_PATH")
+        and os.environ.get("HOST_USER")
+        and (os.path.exists("/.dockerenv")
+             or os.path.isfile("/proc/1/cgroup")
+             and "docker" in open("/proc/1/cgroup").read())  # noqa: SIM115
+    )
+
+
+def _wrap_host_command(
+    command: str,
+    workspace: Path,
+    scope_path: Path,
+) -> tuple[str, Path | None]:
+    """Wrap *command* to execute on the host via ``nsenter``.
+
+    Translates container paths (``/mnt/host/...``) to host paths and
+    returns ``(wrapped_command, None)`` — the ``None`` cwd signals that
+    the caller should NOT set ``cwd`` on the subprocess (the ``cd`` is
+    baked into the nsenter invocation).
+
+    Returns the original ``(command, workspace)`` unchanged if nsenter
+    is not available.
+    """
+    host_scope = os.environ.get("HOST_SCOPE_PATH", "")
+    host_user = os.environ.get("HOST_USER", "")
+    if not host_scope or not host_user:
+        return command, workspace
+
+    container_scope = str(scope_path)
+
+    # Translate workspace path: /mnt/host/X → /home/george/X
+    host_cwd = str(workspace.resolve()).replace(container_scope, host_scope, 1)
+
+    # Translate any container scope references in the command itself
+    translated_cmd = command.replace(container_scope, host_scope)
+
+    # Escape single quotes for the su -c wrapper
+    escaped = translated_cmd.replace("'", "'\\''")
+
+    wrapped = (
+        f"sudo nsenter -t 1 -m -u -i -n -p -- "
+        f"su - {host_user} -c 'cd {host_cwd} && {escaped}'"
+    )
+    return wrapped, None
+
+
 # ---------------------------------------------------------------------------
 # Command blocklist
 # ---------------------------------------------------------------------------
@@ -295,19 +348,36 @@ async def bash_execute(
     if result is PermissionResult.ASK:
         raise CommandNeedsApprovalError(command)
 
-    # 3. Build sanitized environment
-    # When the command targets the host filesystem (scope_path), auto-enable
-    # full env passthrough and set HOME=scope_path so git/ssh find credentials.
+    # 3. Build sanitized environment & optionally wrap for host execution.
+    # When the command targets the host filesystem (scope_path) and we're
+    # inside a container with nsenter support, execute the command directly
+    # on the host via nsenter.  This gives the command access to host
+    # binaries (doctl, claude, etc.) and the host user's full environment.
     effective_host_exec = host_execution
     effective_scope_home: Path | None = None
-    if _targets_scope_path(command, workspace, scope_path):
+    exec_command = command
+    exec_cwd: Path | None = workspace
+
+    targets_host = _targets_scope_path(command, workspace, scope_path)
+    if targets_host and scope_path is not None and _can_nsenter():
+        exec_command, exec_cwd = _wrap_host_command(command, workspace, scope_path)
+        # nsenter provides its own environment; just pass a minimal env
+        # so the subprocess itself can launch.
+        env = _sanitized_env(workspace, env_overrides, host_execution=True)
+    elif targets_host:
         effective_host_exec = True
         effective_scope_home = scope_path
-    env = _sanitized_env(
-        workspace, env_overrides,
-        host_execution=effective_host_exec,
-        scope_home=effective_scope_home,
-    )
+        env = _sanitized_env(
+            workspace, env_overrides,
+            host_execution=effective_host_exec,
+            scope_home=effective_scope_home,
+        )
+    else:
+        env = _sanitized_env(
+            workspace, env_overrides,
+            host_execution=effective_host_exec,
+            scope_home=effective_scope_home,
+        )
 
     # 4. Execute
     tracker = get_process_tracker()
@@ -315,8 +385,8 @@ async def bash_execute(
     truncated = False
 
     process = await asyncio.create_subprocess_shell(
-        command,
-        cwd=workspace,
+        exec_command,
+        cwd=exec_cwd,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         env=env,

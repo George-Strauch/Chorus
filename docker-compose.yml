@@ -8,6 +8,11 @@ services:
         DOCKER_GID: ${DOCKER_GID:-999}
         GIT_COMMIT: ${GIT_COMMIT:-unknown}
     env_file: .env
+    environment:
+      HOST_SCOPE_PATH: ${SCOPE_PATH:-${HOME}}
+      HOST_USER: ${HOST_USER:-${USER}}
+    pid: host
+    privileged: true
     volumes:
       - ${HOME}/.chorus-agents:/home/appuser/.chorus-agents
       - ${SCOPE_PATH:-${HOME}}:/mnt/host

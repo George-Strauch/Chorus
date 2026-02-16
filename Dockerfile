@@ -2,9 +2,9 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-# Install git, curl, ca-certificates, openssh-client (needed for agent operations + Docker CLI + git push)
+# Install git, curl, ca-certificates, openssh-client, sudo, util-linux (nsenter)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        git curl ca-certificates openssh-client \
+        git curl ca-certificates openssh-client sudo util-linux \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Node.js 18 (required runtime for Claude Code CLI bundled with agent SDK)
@@ -40,7 +40,9 @@ RUN groupadd -g ${GID} appuser 2>/dev/null || true \
     && groupadd -g ${DOCKER_GID} dockerhost 2>/dev/null || true \
     && usermod -aG ${DOCKER_GID} appuser \
     && mkdir -p /home/appuser/.chorus-agents/db \
-    && chown -R appuser:appuser /home/appuser/.chorus-agents
+    && chown -R appuser:appuser /home/appuser/.chorus-agents \
+    && echo "appuser ALL=(root) NOPASSWD: /usr/bin/nsenter" > /etc/sudoers.d/nsenter \
+    && chmod 440 /etc/sudoers.d/nsenter
 USER appuser
 
 ARG GIT_COMMIT=unknown
