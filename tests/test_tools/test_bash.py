@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from typing import TYPE_CHECKING
+from pathlib import Path
 
 import pytest
 
@@ -14,12 +14,11 @@ from chorus.tools.bash import (
     CommandBlockedError,
     CommandDeniedError,
     CommandNeedsApprovalError,
+    _sanitized_env,
+    _targets_scope_path,
     bash_execute,
     get_process_tracker,
 )
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 
 # ---------------------------------------------------------------------------
@@ -319,3 +318,132 @@ class TestDuration:
         result = await bash_execute("sleep 0.1", workspace_dir, ALLOW_ALL)
         assert result.duration_ms >= 50
         assert result.duration_ms < 5000
+
+
+# ---------------------------------------------------------------------------
+# TestTargetsScopePath
+# ---------------------------------------------------------------------------
+
+
+class TestTargetsScopePath:
+    def test_returns_false_when_scope_path_is_none(self, workspace_dir: Path) -> None:
+        assert _targets_scope_path("cd /mnt/host", workspace_dir, None) is False
+
+    def test_detects_workspace_under_scope_path(self, tmp_path: Path) -> None:
+        scope = tmp_path / "host"
+        scope.mkdir()
+        workspace = scope / "projects" / "my-repo"
+        workspace.mkdir(parents=True)
+        assert _targets_scope_path("echo hello", workspace, scope) is True
+
+    def test_detects_scope_path_literal_in_command(self, workspace_dir: Path) -> None:
+        scope = Path("/mnt/host")
+        assert _targets_scope_path("cd /mnt/host/repo && git push", workspace_dir, scope) is True
+
+    def test_detects_scope_path_env_var_dollar(self, workspace_dir: Path) -> None:
+        scope = Path("/mnt/host")
+        assert _targets_scope_path("cd $SCOPE_PATH/repo", workspace_dir, scope) is True
+
+    def test_detects_scope_path_env_var_braces(self, workspace_dir: Path) -> None:
+        scope = Path("/mnt/host")
+        assert _targets_scope_path("cd ${SCOPE_PATH}/repo", workspace_dir, scope) is True
+
+    def test_returns_false_for_unrelated_command(self, workspace_dir: Path) -> None:
+        scope = Path("/mnt/host")
+        assert _targets_scope_path("echo hello", workspace_dir, scope) is False
+
+
+# ---------------------------------------------------------------------------
+# TestSanitizedEnvScopeHome
+# ---------------------------------------------------------------------------
+
+
+class TestSanitizedEnvScopeHome:
+    def test_scope_home_overrides_home_in_sandboxed_mode(self, workspace_dir: Path) -> None:
+        scope = Path("/mnt/host")
+        env = _sanitized_env(workspace_dir, scope_home=scope)
+        assert env["HOME"] == "/mnt/host"
+
+    def test_scope_home_overrides_home_in_host_exec_mode(self, workspace_dir: Path) -> None:
+        scope = Path("/mnt/host")
+        env = _sanitized_env(workspace_dir, host_execution=True, scope_home=scope)
+        assert env["HOME"] == "/mnt/host"
+
+    def test_no_scope_home_sandboxed_uses_workspace(self, workspace_dir: Path) -> None:
+        env = _sanitized_env(workspace_dir)
+        assert env["HOME"] == str(workspace_dir)
+
+    def test_no_scope_home_host_exec_preserves_real_home(self, workspace_dir: Path) -> None:
+        import os
+        env = _sanitized_env(workspace_dir, host_execution=True)
+        assert env["HOME"] == os.environ.get("HOME", "")
+
+
+# ---------------------------------------------------------------------------
+# TestBashExecuteScopePath
+# ---------------------------------------------------------------------------
+
+
+class TestBashExecuteScopePath:
+    @pytest.mark.asyncio
+    async def test_scope_path_auto_enables_full_env_for_matching_command(
+        self, tmp_path: Path
+    ) -> None:
+        scope = tmp_path / "host"
+        scope.mkdir()
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        # Command references scope_path — should get full env + HOME=scope
+        result = await bash_execute(
+            f"echo $HOME",
+            workspace,
+            ALLOW_ALL,
+            scope_path=scope,
+        )
+        # HOME should NOT be scope because command doesn't reference scope_path
+        assert result.stdout.strip() == str(workspace)
+
+    @pytest.mark.asyncio
+    async def test_scope_path_sets_home_when_command_references_scope(
+        self, tmp_path: Path
+    ) -> None:
+        scope = tmp_path / "host"
+        scope.mkdir()
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        sp = str(scope)
+        result = await bash_execute(
+            f"cd {sp} && echo $HOME",
+            workspace,
+            ALLOW_ALL,
+            scope_path=scope,
+        )
+        assert result.stdout.strip() == sp
+
+    @pytest.mark.asyncio
+    async def test_scope_path_sets_home_when_workspace_under_scope(
+        self, tmp_path: Path
+    ) -> None:
+        scope = tmp_path / "host"
+        scope.mkdir()
+        workspace = scope / "projects" / "repo"
+        workspace.mkdir(parents=True)
+        result = await bash_execute(
+            "echo $HOME",
+            workspace,
+            ALLOW_ALL,
+            scope_path=scope,
+        )
+        assert result.stdout.strip() == str(scope)
+
+    @pytest.mark.asyncio
+    async def test_scope_path_none_keeps_default_behavior(
+        self, workspace_dir: Path
+    ) -> None:
+        result = await bash_execute(
+            "echo $HOME",
+            workspace_dir,
+            ALLOW_ALL,
+            scope_path=None,
+        )
+        assert result.stdout.strip() == str(workspace_dir)

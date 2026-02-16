@@ -3,11 +3,8 @@
 from __future__ import annotations
 
 import subprocess
-from typing import TYPE_CHECKING
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 import pytest
 
@@ -454,3 +451,63 @@ class TestGeneral:
         ask_only = PermissionProfile(allow=[], ask=[r"tool:git:.*"])
         with pytest.raises(CommandNeedsApprovalError):
             await git_log(git_workspace, ask_only)
+
+
+# ---------------------------------------------------------------------------
+# TestScopePathForwarding
+# ---------------------------------------------------------------------------
+
+
+class TestScopePathForwarding:
+    """Verify git functions forward scope_path to bash_execute."""
+
+    @pytest.mark.asyncio
+    async def test_git_push_forwards_scope_path(
+        self, git_workspace: Path
+    ) -> None:
+        scope = Path("/mnt/host")
+        with patch("chorus.tools.git.bash_execute", new_callable=AsyncMock) as mock_bash:
+            from chorus.tools.bash import BashResult
+
+            mock_bash.return_value = BashResult(
+                command="git push origin main",
+                exit_code=0, stdout="", stderr="",
+                timed_out=False, duration_ms=50,
+            )
+            await git_push(
+                git_workspace, "origin", "main", OPEN,
+                host_execution=True, scope_path=scope,
+            )
+            _, kwargs = mock_bash.call_args
+            assert kwargs.get("host_execution") is True
+            assert kwargs.get("scope_path") == scope
+
+    @pytest.mark.asyncio
+    async def test_git_commit_forwards_scope_path(
+        self, git_workspace: Path
+    ) -> None:
+        scope = Path("/mnt/host")
+        (git_workspace / "file.txt").write_text("data\n")
+        with patch("chorus.tools.git.bash_execute", new_callable=AsyncMock) as mock_bash:
+            from chorus.tools.bash import BashResult
+
+            mock_bash.return_value = BashResult(
+                command="git add -A",
+                exit_code=0, stdout="", stderr="",
+                timed_out=False, duration_ms=50,
+            )
+            await git_commit(
+                git_workspace, "test", OPEN,
+                scope_path=scope,
+            )
+            # All bash_execute calls should have scope_path forwarded
+            for call in mock_bash.call_args_list:
+                assert call.kwargs.get("scope_path") == scope
+
+    @pytest.mark.asyncio
+    async def test_git_log_accepts_scope_path(
+        self, git_workspace: Path
+    ) -> None:
+        # scope_path=None (default) should work without error
+        result = await git_log(git_workspace, OPEN, scope_path=None)
+        assert result.success

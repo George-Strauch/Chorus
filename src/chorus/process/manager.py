@@ -20,7 +20,7 @@ from chorus.process.models import (
     TrackedProcess,
 )
 from chorus.process.monitor import OutputMonitor
-from chorus.tools.bash import _sanitized_env
+from chorus.tools.bash import _sanitized_env, _targets_scope_path
 
 if TYPE_CHECKING:
     from chorus.storage.db import Database
@@ -74,10 +74,12 @@ class ProcessManager:
         chorus_home: Path,
         db: Database | None = None,
         host_execution: bool = False,
+        scope_path: Path | None = None,
     ) -> None:
         self._chorus_home = chorus_home
         self._db = db
         self._host_execution = host_execution
+        self._scope_path = scope_path
         self._processes: dict[int, TrackedProcess] = {}
         self._monitors: dict[int, OutputMonitor] = {}
         self._subprocess_handles: dict[int, asyncio.subprocess.Process] = {}
@@ -115,7 +117,17 @@ class ProcessManager:
 
         Returns a TrackedProcess with the assigned PID.
         """
-        env = _sanitized_env(workspace, env_overrides, host_execution=self._host_execution)
+        # Auto-detect scope targeting for host credential resolution
+        effective_host_exec = self._host_execution
+        effective_scope_home: Path | None = None
+        if _targets_scope_path(command, workspace, self._scope_path):
+            effective_host_exec = True
+            effective_scope_home = self._scope_path
+        env = _sanitized_env(
+            workspace, env_overrides,
+            host_execution=effective_host_exec,
+            scope_home=effective_scope_home,
+        )
 
         # Wrap with stdbuf to force line-buffered stdout so hooks see
         # output in real time instead of only at process exit.

@@ -85,6 +85,7 @@ def _sanitized_env(
     workspace: Path,
     overrides: dict[str, str] | None = None,
     host_execution: bool = False,
+    scope_home: Path | None = None,
 ) -> dict[str, str]:
     """Build a sanitized environment for subprocess execution.
 
@@ -96,6 +97,10 @@ def _sanitized_env(
     through and ``HOME`` is NOT jailed. This gives the subprocess access
     to the host's full development environment (compilers, tools, etc.).
 
+    When *scope_home* is set, ``HOME`` is overridden to point there
+    regardless of other settings. This allows git/ssh to find credentials
+    at the host user's home directory (e.g. ``/mnt/host``).
+
     Always sets ``PYTHONUNBUFFERED=1`` so Python subprocesses flush
     stdout/stderr immediately rather than buffering until exit.
     """
@@ -104,6 +109,8 @@ def _sanitized_env(
     else:
         env = {k: v for k, v in os.environ.items() if k in ALLOWED_ENV_VARS}
         env["HOME"] = str(workspace)
+    if scope_home is not None:
+        env["HOME"] = str(scope_home)
     # Force Python subprocesses to flush stdout/stderr line-by-line.
     # Without this, piped stdout is fully buffered (~4-8KB) and output
     # only arrives when the buffer fills or the process exits — breaking
@@ -112,6 +119,29 @@ def _sanitized_env(
     if overrides:
         env.update(overrides)
     return env
+
+
+# ---------------------------------------------------------------------------
+# Scope-path detection
+# ---------------------------------------------------------------------------
+
+
+def _targets_scope_path(command: str, workspace: Path, scope_path: Path | None) -> bool:
+    """Return True if *command* or *workspace* references *scope_path*.
+
+    Used to auto-detect when a bash command targets the host filesystem
+    so we can enable full environment passthrough and set HOME accordingly.
+    """
+    if scope_path is None:
+        return False
+    sp = str(scope_path)
+    # Workspace itself is under scope_path
+    if str(workspace.resolve()).startswith(sp):
+        return True
+    # Command references scope_path literally or via env var
+    if sp in command or "$SCOPE_PATH" in command or "${SCOPE_PATH}" in command:
+        return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -222,6 +252,7 @@ async def bash_execute(
     agent_name: str = "",
     sigterm_grace: float = _DEFAULT_SIGTERM_GRACE_SECONDS,
     host_execution: bool = False,
+    scope_path: Path | None = None,
 ) -> BashResult:
     """Execute *command* in a subprocess within *workspace*.
 
@@ -265,7 +296,18 @@ async def bash_execute(
         raise CommandNeedsApprovalError(command)
 
     # 3. Build sanitized environment
-    env = _sanitized_env(workspace, env_overrides, host_execution=host_execution)
+    # When the command targets the host filesystem (scope_path), auto-enable
+    # full env passthrough and set HOME=scope_path so git/ssh find credentials.
+    effective_host_exec = host_execution
+    effective_scope_home: Path | None = None
+    if _targets_scope_path(command, workspace, scope_path):
+        effective_host_exec = True
+        effective_scope_home = scope_path
+    env = _sanitized_env(
+        workspace, env_overrides,
+        host_execution=effective_host_exec,
+        scope_home=effective_scope_home,
+    )
 
     # 4. Execute
     tracker = get_process_tracker()

@@ -100,6 +100,7 @@ class ChorusBot(commands.Bot):
             chorus_home=self.config.chorus_home,
             db=self.db,
             host_execution=self.config.host_execution,
+            scope_path=self.config.scope_path,
         )
         await self._process_manager.recover_on_startup()
 
@@ -575,6 +576,7 @@ class ChorusBot(commands.Bot):
                 is_admin=is_admin,
                 db=self.db,
                 host_execution=self.config.host_execution,
+                scope_path=self.config.scope_path,
                 process_manager=self._process_manager,
                 hook_dispatcher=self._hook_dispatcher,
                 branch_id=target_thread.id,

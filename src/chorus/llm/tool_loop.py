@@ -35,7 +35,7 @@ if TYPE_CHECKING:
 # Parameters that are injected by _execute_tool, not provided by the LLM.
 _CONTEXT_INJECTED_PARAMS = frozenset({
     "workspace", "profile", "agent_name", "chorus_home",
-    "is_admin", "db", "host_execution",
+    "is_admin", "db", "host_execution", "scope_path",
     "process_manager", "branch_id", "on_tool_progress",
     "hook_dispatcher",
 })
@@ -211,6 +211,7 @@ class ToolExecutionContext:
     is_admin: bool = False
     db: Any = None
     host_execution: bool = False
+    scope_path: Any = None  # Path | None — auto-detect host credential resolution
     process_manager: Any = None
     hook_dispatcher: Any = None
     branch_id: int | None = None
@@ -349,6 +350,8 @@ async def _execute_tool(
         kwargs["db"] = ctx.db
     if "host_execution" in sig.parameters and "host_execution" not in arguments:
         kwargs["host_execution"] = ctx.host_execution
+    if "scope_path" in sig.parameters and "scope_path" not in arguments:
+        kwargs["scope_path"] = ctx.scope_path
     if "process_manager" in sig.parameters and "process_manager" not in arguments:
         kwargs["process_manager"] = ctx.process_manager
     if "hook_dispatcher" in sig.parameters and "hook_dispatcher" not in arguments:

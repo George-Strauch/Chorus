@@ -83,6 +83,8 @@ async def _git(
     args: str,
     profile: PermissionProfile,
     operation: str,
+    host_execution: bool = False,
+    scope_path: Path | None = None,
 ) -> GitResult:
     """Run ``git <args>`` with permission checking.
 
@@ -96,6 +98,10 @@ async def _git(
         Permission profile to check against.
     operation:
         Logical operation name for the action string (e.g. ``"push"``).
+    host_execution:
+        Whether to use the full host environment.
+    scope_path:
+        Host filesystem path for credential resolution auto-detection.
 
     Raises
     ------
@@ -116,6 +122,8 @@ async def _git(
         workspace,
         profile=_OPEN_PROFILE,
         timeout=60.0,
+        host_execution=host_execution,
+        scope_path=scope_path,
     )
 
     return GitResult(
@@ -135,9 +143,12 @@ async def git_init(
     workspace: Path,
     agent_name: str,
     profile: PermissionProfile,
+    host_execution: bool = False,
+    scope_path: Path | None = None,
 ) -> GitResult:
     """Initialize a git repo in *workspace* and set user config."""
-    result = await _git(workspace, "init", profile, "init")
+    result = await _git(workspace, "init", profile, "init",
+                        host_execution=host_execution, scope_path=scope_path)
     if not result.success:
         return result
     await _git(
@@ -145,12 +156,16 @@ async def git_init(
         f"config user.name {shlex.quote(agent_name)}",
         profile,
         "config",
+        host_execution=host_execution,
+        scope_path=scope_path,
     )
     await _git(
         workspace,
         f"config user.email {shlex.quote(agent_name + '@chorus.local')}",
         profile,
         "config",
+        host_execution=host_execution,
+        scope_path=scope_path,
     )
     return result
 
@@ -160,6 +175,8 @@ async def git_commit(
     message: str,
     profile: PermissionProfile,
     files: list[str] | None = None,
+    host_execution: bool = False,
+    scope_path: Path | None = None,
 ) -> GitResult:
     """Stage files and commit.
 
@@ -168,15 +185,19 @@ async def git_commit(
     """
     if files:
         for f in files:
-            await _git(workspace, f"add {shlex.quote(f)}", profile, "add")
+            await _git(workspace, f"add {shlex.quote(f)}", profile, "add",
+                        host_execution=host_execution, scope_path=scope_path)
     else:
-        await _git(workspace, "add -A", profile, "add")
+        await _git(workspace, "add -A", profile, "add",
+                    host_execution=host_execution, scope_path=scope_path)
 
     result = await _git(
         workspace,
         f"commit -m {shlex.quote(message)}",
         profile,
         "commit",
+        host_execution=host_execution,
+        scope_path=scope_path,
     )
 
     if result.success:
@@ -192,6 +213,8 @@ async def git_push(
     remote: str,
     branch: str,
     profile: PermissionProfile,
+    host_execution: bool = False,
+    scope_path: Path | None = None,
 ) -> GitResult:
     """Push to a remote."""
     return await _git(
@@ -199,6 +222,8 @@ async def git_push(
         f"push {shlex.quote(remote)} {shlex.quote(branch)}",
         profile,
         "push",
+        host_execution=host_execution,
+        scope_path=scope_path,
     )
 
 
@@ -207,22 +232,29 @@ async def git_branch(
     profile: PermissionProfile,
     branch_name: str | None = None,
     delete: bool = False,
+    host_execution: bool = False,
+    scope_path: Path | None = None,
 ) -> GitResult:
     """Create, list, or delete branches."""
     if branch_name is None:
-        return await _git(workspace, "branch", profile, "branch")
+        return await _git(workspace, "branch", profile, "branch",
+                          host_execution=host_execution, scope_path=scope_path)
     if delete:
         return await _git(
             workspace,
             f"branch -d {shlex.quote(branch_name)}",
             profile,
             "branch",
+            host_execution=host_execution,
+            scope_path=scope_path,
         )
     return await _git(
         workspace,
         f"branch {shlex.quote(branch_name)}",
         profile,
         "branch",
+        host_execution=host_execution,
+        scope_path=scope_path,
     )
 
 
@@ -231,6 +263,8 @@ async def git_checkout(
     ref: str,
     profile: PermissionProfile,
     create: bool = False,
+    host_execution: bool = False,
+    scope_path: Path | None = None,
 ) -> GitResult:
     """Checkout a branch, tag, or commit."""
     flag = "-b " if create else ""
@@ -239,6 +273,8 @@ async def git_checkout(
         f"checkout {flag}{shlex.quote(ref)}",
         profile,
         "checkout",
+        host_execution=host_execution,
+        scope_path=scope_path,
     )
 
 
@@ -247,6 +283,8 @@ async def git_diff(
     profile: PermissionProfile,
     ref1: str | None = None,
     ref2: str | None = None,
+    host_execution: bool = False,
+    scope_path: Path | None = None,
 ) -> GitResult:
     """Show diff — working tree vs HEAD, or between two refs."""
     if ref1 and ref2:
@@ -255,7 +293,8 @@ async def git_diff(
         args = f"diff {shlex.quote(ref1)}"
     else:
         args = "diff"
-    return await _git(workspace, args, profile, "diff")
+    return await _git(workspace, args, profile, "diff",
+                      host_execution=host_execution, scope_path=scope_path)
 
 
 async def git_log(
@@ -263,10 +302,13 @@ async def git_log(
     profile: PermissionProfile,
     count: int = 20,
     oneline: bool = False,
+    host_execution: bool = False,
+    scope_path: Path | None = None,
 ) -> GitResult:
     """Show commit log."""
     fmt = " --oneline" if oneline else ""
-    return await _git(workspace, f"log -n {count}{fmt}", profile, "log")
+    return await _git(workspace, f"log -n {count}{fmt}", profile, "log",
+                      host_execution=host_execution, scope_path=scope_path)
 
 
 # ---------------------------------------------------------------------------
@@ -274,7 +316,11 @@ async def git_log(
 # ---------------------------------------------------------------------------
 
 
-async def _detect_forge(workspace: Path) -> str:
+async def _detect_forge(
+    workspace: Path,
+    host_execution: bool = False,
+    scope_path: Path | None = None,
+) -> str:
     """Detect the forge type from the origin remote URL.
 
     Returns ``"github"`` or ``"gitlab"``.
@@ -291,6 +337,8 @@ async def _detect_forge(workspace: Path) -> str:
         workspace,
         profile=_OPEN_PROFILE,
         timeout=10.0,
+        host_execution=host_execution,
+        scope_path=scope_path,
     )
     if result.exit_code != 0:
         raise GitError(f"No origin remote configured: {result.stderr.strip()}")
@@ -310,6 +358,8 @@ async def git_merge_request(
     source_branch: str,
     target_branch: str,
     profile: PermissionProfile,
+    host_execution: bool = False,
+    scope_path: Path | None = None,
 ) -> GitResult:
     """Create a merge/pull request on the detected forge.
 
@@ -326,7 +376,7 @@ async def git_merge_request(
             f"Needs approval: {action}",
         )
 
-    forge = await _detect_forge(workspace)
+    forge = await _detect_forge(workspace, host_execution=host_execution, scope_path=scope_path)
 
     q_title = shlex.quote(title)
     q_desc = shlex.quote(description)
@@ -341,7 +391,10 @@ async def git_merge_request(
             f" --source-branch {q_src} --target-branch {q_tgt}"
         )
 
-    result = await bash_execute(cmd, workspace, profile=_OPEN_PROFILE, timeout=30.0)
+    result = await bash_execute(
+        cmd, workspace, profile=_OPEN_PROFILE, timeout=30.0,
+        host_execution=host_execution, scope_path=scope_path,
+    )
 
     return GitResult(
         operation="merge_request",

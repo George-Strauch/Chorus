@@ -842,6 +842,34 @@ class TestToolContextInjection:
 
 
 # ---------------------------------------------------------------------------
+# scope_path context field
+# ---------------------------------------------------------------------------
+
+
+class TestScopePathContext:
+    def test_scope_path_in_context_injected_params(self) -> None:
+        from chorus.llm.tool_loop import _CONTEXT_INJECTED_PARAMS
+
+        assert "scope_path" in _CONTEXT_INJECTED_PARAMS
+
+    def test_tool_execution_context_default_scope_path_is_none(self, tmp_path: Path) -> None:
+        ctx = _make_ctx(tmp_path)
+        assert ctx.scope_path is None
+
+    def test_tool_execution_context_accepts_scope_path(self, tmp_path: Path) -> None:
+        workspace = tmp_path / "workspace"
+        workspace.mkdir(exist_ok=True)
+        scope = Path("/mnt/host")
+        ctx = ToolExecutionContext(
+            workspace=workspace,
+            profile=_open_profile(),
+            agent_name="test-agent",
+            scope_path=scope,
+        )
+        assert ctx.scope_path == scope
+
+
+# ---------------------------------------------------------------------------
 # on_event callback
 # ---------------------------------------------------------------------------
 
