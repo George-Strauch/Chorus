@@ -616,12 +616,16 @@ class ChorusBot(commands.Bot):
             registry = create_default_registry()
 
             # Set up live status view
+            async def _kill_this_branch() -> None:
+                await tm.kill_thread(thread.id)
+
             status_view = LiveStatusView(
                 channel=channel,
                 agent_name=agent.name,
                 thread_id=thread.id,
                 get_active_count=lambda: len(tm.list_active()),
                 reference=reference,
+                kill_callback=_kill_this_branch,
             )
             await status_view.start()
             if status_view.message is not None:

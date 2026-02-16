@@ -135,6 +135,40 @@ def chunk_response(content: str, max_chunk: int = _MAX_CHUNK) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
+# KillBranchView — red "Kill" button on the heartbeat message
+# ---------------------------------------------------------------------------
+
+
+class KillBranchView(discord.ui.View):
+    """A single red button that kills the running branch."""
+
+    def __init__(
+        self,
+        kill_callback: Callable[[], Any],
+        timeout: float = 600,
+    ) -> None:
+        super().__init__(timeout=timeout)
+        self._kill_callback = kill_callback
+
+    @discord.ui.button(label="Kill", style=discord.ButtonStyle.danger)
+    async def kill_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button[KillBranchView],
+    ) -> None:
+        button.disabled = True
+        await interaction.response.edit_message(view=self)
+        await self._kill_callback()
+
+    async def on_timeout(self) -> None:
+        self.disable()
+
+    def disable(self) -> None:
+        for child in self.children:
+            child.disabled = True  # type: ignore[union-attr]
+
+
+# ---------------------------------------------------------------------------
 # LiveStatusView — plain text two-phase pattern
 # ---------------------------------------------------------------------------
 
@@ -201,6 +235,7 @@ class LiveStatusView:
         reference: discord.Message | None = None,
         _rate_limiter: Any | None = None,  # kept for API compat, unused
         _clock: Callable[[], float] | None = None,
+        kill_callback: Callable[[], Any] | None = None,
     ) -> None:
         self._channel = channel
         self._snapshot = StatusSnapshot(
@@ -211,6 +246,8 @@ class LiveStatusView:
         self._get_active_count = get_active_count
         self._reference = reference
         self._clock = _clock or self._default_clock
+        self._kill_callback = kill_callback
+        self._kill_view: KillBranchView | None = None
         self._message: discord.Message | None = None
         self._started_at: float | None = None
         self._ticker_task: asyncio.Task[None] | None = None
@@ -237,6 +274,9 @@ class LiveStatusView:
             kwargs: dict[str, Any] = {"content": _THINKING_MSG}
             if self._reference is not None:
                 kwargs["reference"] = self._reference
+            if self._kill_callback is not None:
+                self._kill_view = KillBranchView(self._kill_callback)
+                kwargs["view"] = self._kill_view
             self._message = await self._channel.send(**kwargs)
         except Exception:
             logger.warning("Failed to send thinking message", exc_info=True)
@@ -293,6 +333,10 @@ class LiveStatusView:
         self._stop_ticker()
         self._chunk_message_ids = []
 
+        # Disable the kill button now that the branch is done
+        if self._kill_view is not None:
+            self._kill_view.disable()
+
         self._snapshot.status = status
         if error:
             self._snapshot.error_message = error
@@ -332,7 +376,10 @@ class LiveStatusView:
         if is_quick_single:
             # Single chunk, fast response — edit in-place
             try:
-                await self._message.edit(content=first_chunk, embed=None)
+                edit_kwargs: dict[str, Any] = {"content": first_chunk, "embed": None}
+                if self._kill_view is not None:
+                    edit_kwargs["view"] = self._kill_view
+                await self._message.edit(**edit_kwargs)
                 self._chunk_message_ids.append(self._message.id)
             except Exception:
                 logger.warning("Failed to edit response message", exc_info=True)

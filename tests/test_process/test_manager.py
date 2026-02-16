@@ -502,3 +502,77 @@ async def test_stdbuf_wraps_command(pm: ProcessManager, workspace: Path) -> None
         assert shutil.which("stdbuf") is not None
 
     await pm.kill_process(tracked.pid)
+
+
+@pytest.mark.asyncio
+async def test_spawn_uses_nsenter_when_available(
+    chorus_home: Path, db: Database, workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """spawn() wraps command with nsenter when targeting scope path in a container."""
+    scope_path = Path("/mnt/host")
+    pm = ProcessManager(
+        chorus_home=chorus_home, db=db, scope_path=scope_path,
+    )
+
+    # Mock _can_nsenter to return True (pretend we're in a container)
+    monkeypatch.setattr("chorus.process.manager._can_nsenter", lambda: True)
+    monkeypatch.setenv("HOST_SCOPE_PATH", "/home/george")
+    monkeypatch.setenv("HOST_USER", "george")
+
+    # Capture the actual command passed to create_subprocess_shell
+    captured_cmds: list[str] = []
+    captured_cwds: list[Path | None] = []
+    original_create = asyncio.create_subprocess_shell
+
+    async def mock_create(cmd: str, **kwargs: object) -> asyncio.subprocess.Process:
+        captured_cmds.append(cmd)
+        captured_cwds.append(kwargs.get("cwd"))  # type: ignore[arg-type]
+        # Use a real fast command for the actual subprocess
+        return await original_create("true", cwd=workspace, **{
+            k: v for k, v in kwargs.items() if k != "cwd"
+        })
+
+    monkeypatch.setattr(asyncio, "create_subprocess_shell", mock_create)
+
+    # Command targeting scope path
+    tracked = await pm.spawn(
+        command="git push /mnt/host/project",
+        workspace=workspace,
+        agent_name="test-agent",
+        process_type=ProcessType.BACKGROUND,
+    )
+
+    assert len(captured_cmds) == 1
+    assert "nsenter" in captured_cmds[0]
+    assert captured_cwds[0] is None  # nsenter bakes in the cd
+
+    await asyncio.sleep(0.3)
+    await pm.kill_process(tracked.pid)
+
+
+@pytest.mark.asyncio
+async def test_spawn_no_nsenter_without_scope_path(
+    pm: ProcessManager, workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """spawn() does not use nsenter when command doesn't target scope path."""
+    captured_cmds: list[str] = []
+    original_create = asyncio.create_subprocess_shell
+
+    async def mock_create(cmd: str, **kwargs: object) -> asyncio.subprocess.Process:
+        captured_cmds.append(cmd)
+        return await original_create(cmd, **kwargs)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_shell", mock_create)
+
+    tracked = await pm.spawn(
+        command="echo hello",
+        workspace=workspace,
+        agent_name="test-agent",
+        process_type=ProcessType.BACKGROUND,
+    )
+
+    assert len(captured_cmds) == 1
+    assert "nsenter" not in captured_cmds[0]
+
+    await asyncio.sleep(0.3)
+    await pm.kill_process(tracked.pid)

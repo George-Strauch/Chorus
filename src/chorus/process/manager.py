@@ -20,7 +20,7 @@ from chorus.process.models import (
     TrackedProcess,
 )
 from chorus.process.monitor import OutputMonitor
-from chorus.tools.bash import _sanitized_env, _targets_scope_path
+from chorus.tools.bash import _can_nsenter, _sanitized_env, _targets_scope_path, _wrap_host_command
 
 if TYPE_CHECKING:
     from chorus.storage.db import Database
@@ -120,22 +120,38 @@ class ProcessManager:
         # Auto-detect scope targeting for host credential resolution
         effective_host_exec = self._host_execution
         effective_scope_home: Path | None = None
-        if _targets_scope_path(command, workspace, self._scope_path):
+        exec_command = command
+        exec_cwd: Path | None = workspace
+        targets_host = _targets_scope_path(command, workspace, self._scope_path)
+
+        if targets_host and self._scope_path is not None and _can_nsenter():
+            exec_command, exec_cwd = _wrap_host_command(command, workspace, self._scope_path)
+            env = _sanitized_env(workspace, env_overrides, host_execution=True)
+        elif targets_host:
             effective_host_exec = True
             effective_scope_home = self._scope_path
-        env = _sanitized_env(
-            workspace, env_overrides,
-            host_execution=effective_host_exec,
-            scope_home=effective_scope_home,
-        )
+            env = _sanitized_env(
+                workspace, env_overrides,
+                host_execution=effective_host_exec,
+                scope_home=effective_scope_home,
+            )
+        else:
+            env = _sanitized_env(
+                workspace, env_overrides,
+                host_execution=effective_host_exec,
+                scope_home=effective_scope_home,
+            )
 
         # Wrap with stdbuf to force line-buffered stdout so hooks see
         # output in real time instead of only at process exit.
-        wrapped_command = _wrap_with_stdbuf(command)
+        # Skip stdbuf when using nsenter (host command runs in its own
+        # namespace; the container's stdbuf path doesn't apply).
+        if exec_cwd is not None:
+            exec_command = _wrap_with_stdbuf(exec_command)
 
         process = await asyncio.create_subprocess_shell(
-            wrapped_command,
-            cwd=workspace,
+            exec_command,
+            cwd=exec_cwd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=env,

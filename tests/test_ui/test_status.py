@@ -12,6 +12,7 @@ import pytest
 from chorus.llm.providers import Usage
 from chorus.ui.status import (
     BotPresenceManager,
+    KillBranchView,
     LiveStatusView,
     StatusSnapshot,
     chunk_response,
@@ -891,3 +892,138 @@ class TestFinalizeMultiChunk:
         msg.edit.assert_called_once()
         assert len(view.chunk_message_ids) == 1
         assert view.chunk_message_ids[0] == msg.id
+
+
+# ---------------------------------------------------------------------------
+# KillBranchView
+# ---------------------------------------------------------------------------
+
+
+class TestKillBranchView:
+    @pytest.mark.asyncio
+    async def test_has_kill_button(self) -> None:
+        view = KillBranchView(kill_callback=AsyncMock())
+        buttons = [c for c in view.children if isinstance(c, discord.ui.Button)]
+        assert len(buttons) == 1
+        assert buttons[0].label == "Kill"
+        assert buttons[0].style == discord.ButtonStyle.danger
+
+    @pytest.mark.asyncio
+    async def test_disable_disables_all_children(self) -> None:
+        view = KillBranchView(kill_callback=AsyncMock())
+        view.disable()
+        for child in view.children:
+            assert child.disabled  # type: ignore[union-attr]
+
+    @pytest.mark.asyncio
+    async def test_kill_button_calls_callback(self) -> None:
+        callback = AsyncMock()
+        view = KillBranchView(kill_callback=callback)
+        button = [c for c in view.children if isinstance(c, discord.ui.Button)][0]
+
+        interaction = MagicMock(spec=discord.Interaction)
+        interaction.response = MagicMock()
+        interaction.response.edit_message = AsyncMock()
+
+        await button.callback(interaction)
+
+        callback.assert_awaited_once()
+        assert button.disabled
+        interaction.response.edit_message.assert_awaited_once_with(view=view)
+
+    @pytest.mark.asyncio
+    async def test_on_timeout_disables_buttons(self) -> None:
+        view = KillBranchView(kill_callback=AsyncMock())
+        await view.on_timeout()
+        for child in view.children:
+            assert child.disabled  # type: ignore[union-attr]
+
+
+# ---------------------------------------------------------------------------
+# LiveStatusView with kill callback
+# ---------------------------------------------------------------------------
+
+
+class TestLiveStatusViewKill:
+    @pytest.mark.asyncio
+    async def test_start_sends_view_when_kill_callback_set(self) -> None:
+        channel = _make_mock_channel()
+        clock = FakeClock()
+        kill_cb = AsyncMock()
+        view = LiveStatusView(
+            channel=channel,
+            agent_name="test-agent",
+            thread_id=1,
+            get_active_count=lambda: 1,
+            _clock=clock,
+            kill_callback=kill_cb,
+        )
+        await view.start()
+        call_kwargs = channel.send.call_args.kwargs
+        assert "view" in call_kwargs
+        assert isinstance(call_kwargs["view"], KillBranchView)
+        view._stop_ticker()
+
+    @pytest.mark.asyncio
+    async def test_start_no_view_without_kill_callback(self) -> None:
+        channel = _make_mock_channel()
+        clock = FakeClock()
+        view = LiveStatusView(
+            channel=channel,
+            agent_name="test-agent",
+            thread_id=1,
+            get_active_count=lambda: 1,
+            _clock=clock,
+        )
+        await view.start()
+        call_kwargs = channel.send.call_args.kwargs
+        assert "view" not in call_kwargs
+        view._stop_ticker()
+
+    @pytest.mark.asyncio
+    async def test_finalize_disables_kill_view(self) -> None:
+        channel = _make_mock_channel()
+        clock = FakeClock()
+        kill_cb = AsyncMock()
+        view = LiveStatusView(
+            channel=channel,
+            agent_name="test-agent",
+            thread_id=1,
+            get_active_count=lambda: 1,
+            _clock=clock,
+            kill_callback=kill_cb,
+        )
+        await view.start()
+        assert view._kill_view is not None
+        # Verify buttons are enabled before finalize
+        for child in view._kill_view.children:
+            assert not child.disabled  # type: ignore[union-attr]
+
+        clock.advance(5.0)
+        await view.finalize("completed", response_content="Done")
+
+        # Kill view buttons should be disabled after finalize
+        for child in view._kill_view.children:
+            assert child.disabled  # type: ignore[union-attr]
+
+    @pytest.mark.asyncio
+    async def test_finalize_edit_in_place_includes_view(self) -> None:
+        """When editing in place (<15s), the disabled kill view is passed."""
+        channel = _make_mock_channel()
+        clock = FakeClock()
+        kill_cb = AsyncMock()
+        view = LiveStatusView(
+            channel=channel,
+            agent_name="test-agent",
+            thread_id=1,
+            get_active_count=lambda: 1,
+            _clock=clock,
+            kill_callback=kill_cb,
+        )
+        await view.start()
+        clock.advance(5.0)
+        await view.finalize("completed", response_content="Done")
+        msg = channel.send.return_value
+        edit_kwargs = msg.edit.call_args.kwargs
+        assert "view" in edit_kwargs
+        assert isinstance(edit_kwargs["view"], KillBranchView)
