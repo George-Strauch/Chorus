@@ -182,7 +182,14 @@ def _wrap_host_command(
     container_scope = str(scope_path)
 
     # Translate workspace path: /mnt/host/X → /home/george/X
-    host_cwd = str(workspace.resolve()).replace(container_scope, host_scope, 1)
+    resolved_ws = str(workspace.resolve())
+    if resolved_ws.startswith(container_scope):
+        host_cwd = resolved_ws.replace(container_scope, host_scope, 1)
+    else:
+        # Workspace isn't under scope_path (e.g. container-internal path
+        # like /home/appuser/.chorus-agents/...).  Fall back to the host
+        # user's home directory — the command itself will cd where needed.
+        host_cwd = host_scope
 
     # Translate any container scope references in the command itself
     translated_cmd = command.replace(container_scope, host_scope)

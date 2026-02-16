@@ -16,6 +16,7 @@ from chorus.tools.bash import (
     CommandNeedsApprovalError,
     _sanitized_env,
     _targets_scope_path,
+    _wrap_host_command,
     bash_execute,
     get_process_tracker,
 )
@@ -447,3 +448,75 @@ class TestBashExecuteScopePath:
             scope_path=None,
         )
         assert result.stdout.strip() == str(workspace_dir)
+
+
+# ---------------------------------------------------------------------------
+# _wrap_host_command
+# ---------------------------------------------------------------------------
+
+
+class TestWrapHostCommand:
+    def test_translates_workspace_under_scope(
+        self, monkeypatch: pytest.MonkeyPatch, workspace_dir: Path
+    ) -> None:
+        """Workspace under scope_path gets translated to host path."""
+        monkeypatch.setenv("HOST_SCOPE_PATH", "/home/george")
+        monkeypatch.setenv("HOST_USER", "george")
+        scope = Path("/mnt/host")
+        ws = scope / "project" / "src"
+
+        wrapped, cwd = _wrap_host_command("git push", ws, scope)
+
+        assert "nsenter" in wrapped
+        assert "cd /home/george/project/src" in wrapped
+        assert "git push" in wrapped
+        assert cwd is None
+
+    def test_workspace_not_under_scope_falls_back_to_host_home(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Workspace outside scope_path falls back to HOST_SCOPE_PATH as cwd."""
+        monkeypatch.setenv("HOST_SCOPE_PATH", "/home/george")
+        monkeypatch.setenv("HOST_USER", "george")
+        scope = Path("/mnt/host")
+        ws = Path("/home/appuser/.chorus-agents/agents/test/workspace")
+
+        wrapped, cwd = _wrap_host_command(
+            "cd /mnt/host/PycharmProjects/GH/repo && git push", ws, scope
+        )
+
+        assert "nsenter" in wrapped
+        # Should cd to host home, not the container workspace
+        assert "cd /home/george &&" in wrapped
+        # Container scope refs in command should be translated
+        assert "/home/george/PycharmProjects/GH/repo" in wrapped
+        assert cwd is None
+
+    def test_returns_original_without_env_vars(
+        self, monkeypatch: pytest.MonkeyPatch, workspace_dir: Path
+    ) -> None:
+        """Without HOST_SCOPE_PATH/HOST_USER, returns command unchanged."""
+        monkeypatch.delenv("HOST_SCOPE_PATH", raising=False)
+        monkeypatch.delenv("HOST_USER", raising=False)
+        scope = Path("/mnt/host")
+
+        wrapped, cwd = _wrap_host_command("git push", workspace_dir, scope)
+
+        assert wrapped == "git push"
+        assert cwd == workspace_dir
+
+    def test_translates_scope_refs_in_command(
+        self, monkeypatch: pytest.MonkeyPatch, workspace_dir: Path
+    ) -> None:
+        """Container scope references in the command are translated to host paths."""
+        monkeypatch.setenv("HOST_SCOPE_PATH", "/home/george")
+        monkeypatch.setenv("HOST_USER", "george")
+        scope = Path("/mnt/host")
+        ws = scope / "project"
+
+        wrapped, _ = _wrap_host_command(
+            "ls /mnt/host/project/file.txt", ws, scope
+        )
+
+        assert "/home/george/project/file.txt" in wrapped
+        assert "/mnt/host/" not in wrapped
