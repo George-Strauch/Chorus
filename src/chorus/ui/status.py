@@ -408,7 +408,10 @@ class LiveStatusView:
             parts.append(snap.response_content)
 
         if not parts:
-            parts.append("*(no response)*")
+            if snap.status == "cancelled":
+                parts.append("*(killed)*")
+            else:
+                parts.append("*(no response)*")
 
         return "\n".join(parts)
 

@@ -781,6 +781,9 @@ class ChorusBot(commands.Bot):
                         thread_id=thread.id,
                         discord_message_id=status_view.message.id,
                     )
+            except asyncio.CancelledError:
+                await status_view.finalize("cancelled")
+                raise
             except Exception as exc:
                 await status_view.finalize("error", error=str(exc))
                 raise
