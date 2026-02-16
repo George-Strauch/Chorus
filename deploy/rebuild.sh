@@ -2,9 +2,11 @@
 # Rebuild the Chorus container with the latest source.
 #
 # From the host:  runs docker compose build+up directly.
-# From container: builds the image first, then does a quick container swap.
-#                 The swap (stop old + start new) is fast enough that compose
-#                 finishes before the old container is killed.
+# From container: builds the image inside the container, then uses nsenter
+#                 to run compose on the HOST for the swap. This is necessary
+#                 because Docker kills all processes inside a container when
+#                 stopping it — a compose CLI running inside can't survive
+#                 the stop→recreate cycle.
 #
 # Usage (from host):            bash deploy/rebuild.sh
 # Usage (from agent bash tool): bash /app/deploy/rebuild.sh
@@ -70,13 +72,25 @@ if [ "$IN_CONTAINER" = true ]; then
     echo "Building new image..."
     docker compose -f "$COMPOSE_FILE" build
 
-    # Now swap the container. This stops the old one (us) and starts the new one.
-    # nohup keeps the process alive briefly — the swap is fast since the image
-    # is already built (no --build needed).
-    echo "Swapping container — this container will restart..."
-    nohup docker compose -f "$COMPOSE_FILE" up -d --force-recreate --no-build \
-        > /tmp/rebuild.log 2>&1 &
-    echo "Swap initiated (PID $!). Check 'docker logs chorus-bot-1' for status."
+    # The compose CLI must survive the container stop→recreate cycle.
+    # Running compose inside the container doesn't work: Docker kills ALL
+    # processes (including nohup'd ones) when stopping, so the CLI dies
+    # before it can create+start the replacement container.
+    #
+    # Fix: nsenter into the host PID namespace so the compose process runs
+    # on the host and isn't killed when our container stops.
+    HOST_USER_NAME="${HOST_USER:-$(id -un)}"
+
+    # Translate container-side compose path (/mnt/host/...) → host-side
+    HOST_COMPOSE="${COMPOSE_FILE//\/mnt\/host/$HOST_SCOPE}"
+
+    echo "Swapping container via nsenter (host-side compose)..."
+    echo "  Host compose file: $HOST_COMPOSE"
+    sudo nsenter -t 1 -m -u -i -n -p -- \
+        su - "$HOST_USER_NAME" -c \
+        "SCOPE_PATH='$SCOPE_PATH' HOST_USER='$HOST_USER_NAME' HOST_UID=$HOST_UID HOST_GID=$HOST_GID DOCKER_GID=$DOCKER_GID GIT_COMMIT='$GIT_COMMIT' docker compose -f '$HOST_COMPOSE' up -d --force-recreate --no-build" \
+        &
+    echo "Swap initiated via nsenter (PID $!). This container will restart."
 else
     echo "Rebuilding..."
     docker compose -f "$COMPOSE_FILE" up -d --build --force-recreate
