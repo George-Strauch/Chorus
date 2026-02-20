@@ -719,6 +719,74 @@ def create_default_registry() -> ToolRegistry:
         )
     )
 
+    # -- Agent communication tools ---------------------------------------------
+
+    from chorus.agent.communication import list_agents, read_agent_docs, send_to_agent
+
+    registry.register(
+        ToolDefinition(
+            name="send_to_agent",
+            description=(
+                "Send a fire-and-forget message to another agent. "
+                "The message spawns a new branch in the target agent's channel. "
+                "The target runs with its own permissions."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "target_agent": {
+                        "type": "string",
+                        "description": "Name of the agent to send the message to",
+                    },
+                    "message": {
+                        "type": "string",
+                        "description": "The message to send",
+                    },
+                },
+                "required": ["target_agent", "message"],
+            },
+            handler=send_to_agent,
+        )
+    )
+
+    registry.register(
+        ToolDefinition(
+            name="read_agent_docs",
+            description=(
+                "Read all markdown documentation files from another agent's "
+                "docs/ directory. Useful for discovering what an agent does "
+                "before sending it a message."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "target_agent": {
+                        "type": "string",
+                        "description": "Name of the agent whose docs to read",
+                    },
+                },
+                "required": ["target_agent"],
+            },
+            handler=read_agent_docs,
+        )
+    )
+
+    registry.register(
+        ToolDefinition(
+            name="list_agents",
+            description=(
+                "List all available agents (excluding yourself) with their "
+                "model and a brief description from their docs."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+            handler=list_agents,
+        )
+    )
+
     # -- Git status tool -------------------------------------------------------
 
     from chorus.sub_agents.tasks.git_status import git_status_execute

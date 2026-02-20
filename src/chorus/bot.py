@@ -410,6 +410,72 @@ class ChorusBot(commands.Bot):
             thread.id, agent_name, recursion_depth,
         )
 
+    async def spawn_agent_branch(
+        self,
+        agent_name: str,
+        message: str,
+        sender_agent: str,
+    ) -> None:
+        """Spawn a new LLM branch in another agent's channel.
+
+        Used for inter-agent communication. Unlike spawn_hook_branch, this
+        runs with the target agent's own permissions (is_admin=False).
+        """
+        agent = await self.agent_manager.get_agent(agent_name)
+        if agent is None:
+            logger.warning("spawn_agent_branch: agent %s not found", agent_name)
+            raise ValueError(f"Agent '{agent_name}' not found")
+
+        # Find the Discord channel for this agent
+        channel = self._find_channel_for_agent(agent_name)
+        if channel is None:
+            # Fallback: try to get channel from agent's channel_id
+            ch = self.get_channel(agent.channel_id)
+            if isinstance(ch, discord.TextChannel):
+                channel = ch
+        if channel is None:
+            logger.warning("spawn_agent_branch: no channel for agent %s", agent_name)
+            raise ValueError(f"No channel found for agent '{agent_name}'")
+
+        # Get or create ThreadManager + ContextManager
+        tm = self._thread_managers.setdefault(
+            agent_name, ThreadManager(agent_name, db=self.db)
+        )
+        await tm.initialize()
+
+        if agent_name not in self._context_managers:
+            agent_dir = self.agent_manager._directory._agents_dir / agent_name
+            sessions_dir = agent_dir / "sessions"
+            self._context_managers[agent_name] = ContextManager(
+                agent_name, self.db, sessions_dir
+            )
+        cm = self._context_managers[agent_name]
+
+        # Create branch with the message
+        thread = await tm.create_branch({"role": "user", "content": message})
+        await cm.persist_message(
+            role="user",
+            content=message,
+            thread_id=thread.id,
+            discord_message_id=None,
+        )
+        await self._update_branch_last_message(agent_name, thread.id)
+        await self._generate_branch_summary(agent_name, thread.id, message)
+
+        # Build runner — NOT admin, target agent's own permissions
+        runner = self._make_llm_runner(
+            agent, tm, cm,
+            channel=channel,
+            author_id=0,
+            is_admin=False,
+            target_thread=thread,
+        )
+        tm.start_thread(thread, runner=runner)
+        logger.info(
+            "spawn_agent_branch: started branch #%d for agent %s (from %s)",
+            thread.id, agent_name, sender_agent,
+        )
+
     async def on_message(self, message: discord.Message) -> None:
         """Route messages to agent threads or process as commands."""
         if message.author == self.user:
@@ -580,6 +646,7 @@ class ChorusBot(commands.Bot):
                 process_manager=self._process_manager,
                 hook_dispatcher=self._hook_dispatcher,
                 branch_id=target_thread.id,
+                bot=self,
             )
             # Note: on_tool_progress is set after status_view is created (below)
 

@@ -134,6 +134,7 @@ PRESETS: dict[str, PermissionProfile] = {
             r"tool:git:(?!push|merge_request).*",
             r"tool:self_edit:docs .*",
             r"tool:info:.*",
+            r"tool:agent_comm:.*",
         ],
         ask=[
             r"tool:bash:.*",

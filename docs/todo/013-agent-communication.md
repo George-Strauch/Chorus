@@ -1,97 +1,60 @@
-# TODO 013 — Agent Communication (Future Phase)
+# TODO 013 — Inter-Agent Communication
 
-> **Status:** PENDING
+> **Status:** DONE
 
 ## Objective
 
-Enable inter-agent messaging: agents can send messages to other agent channels, request work from other agents, and receive responses. This transforms Chorus from a collection of independent agents into a collaborative multi-agent system where agents can delegate tasks, share information, and coordinate workflows.
+Enable agents to collaborate by sending messages to each other, reading each other's docs, and discovering available agents. Communication is fire-and-forget: the sending agent continues working while the target processes the message as a new branch.
 
 ## Acceptance Criteria
 
-- An agent can send a message to another agent's channel using a `send_to_agent(target_agent, message)` tool.
-- The target agent receives the message as a regular channel message and can respond to it.
-- Responses are routed back to the originating agent's context.
-- Agents can discover other agents via a `list_agents()` tool that returns names and descriptions (from each agent's `docs/README.md`).
-- Permission check applies: `tool:agent_comm:send <target_agent>`. The standard profile asks for confirmation; open allows automatically.
-- Communication is asynchronous — the sending agent continues working while waiting for a response.
-- A `request_from_agent(target_agent, task_description, timeout?)` tool sends a message and waits for a response, with a configurable timeout.
-- Communication history is logged in both agents' contexts and in the SQLite audit table.
-- Circular communication (agent A asks agent B, which asks agent A) is detected and broken after a configurable depth (default 3).
-- Rate limiting prevents message storms between agents (default 10 inter-agent messages per minute per agent).
+- [x] `send_to_agent(target_agent, message)` delivers an attributed message to the target agent, spawning a new branch in the target's channel.
+- [x] Target agent runs with its own permissions (not admin).
+- [x] Self-send is rejected with a clear error.
+- [x] Missing target agent is rejected with a clear error.
+- [x] `read_agent_docs(target_agent)` reads all `.md` files from the target's `docs/` directory.
+- [x] `list_agents()` returns all agents (excluding self) with model and description from `docs/README.md`.
+- [x] Permission category `agent_comm` with action strings: `send <target>`, `read_docs <target>`, `list`.
+- [x] Standard preset ALLOWs all `agent_comm` actions (no confirmation needed).
+- [x] Tools registered in the default registry with proper JSON schemas.
+- [x] `bot` injectable added to `ToolExecutionContext` and `_execute_tool`.
+- [x] `spawn_agent_branch` method on `ChorusBot` for delivering inter-agent messages.
+- [x] 30 tests passing across 6 test classes.
 
-## Tests to Write First
+## What Was Implemented
 
-File: `tests/test_agent/test_communication.py` (future)
-```
-# Sending
-test_send_to_agent_delivers_message
-test_send_to_agent_permission_check
-test_send_to_agent_nonexistent_target_fails
-test_send_to_agent_message_appears_in_target_channel
-test_send_to_agent_logged_in_audit
+### New file: `src/chorus/agent/communication.py`
 
-# Request/response
-test_request_from_agent_waits_for_response
-test_request_from_agent_timeout
-test_request_from_agent_response_routed_back
+Three handler functions + helper:
 
-# Discovery
-test_list_agents_returns_all_agents
-test_list_agents_includes_descriptions
-test_list_agents_excludes_self
+- **`send_to_agent(target_agent, message, *, agent_name, bot, chorus_home)`** — validates target exists & not self, formats attributed message, calls `bot.spawn_agent_branch()`, returns JSON result.
+- **`read_agent_docs(target_agent, *, agent_name, chorus_home)`** — reads all `.md` files from target's `docs/`, returns content dict.
+- **`list_agents(*, agent_name, chorus_home, db)`** — lists agent directories excluding self, extracts description + model.
+- **`_extract_first_paragraph(markdown)`** — skips headings/emphasis/blockquotes, returns first prose line (capped at 200 chars).
 
-# Safety
-test_circular_communication_detected
-test_circular_communication_broken_at_max_depth
-test_rate_limiting_between_agents
-test_rate_limit_resets_after_window
+### Modified files
 
-# Context
-test_communication_logged_in_sender_context
-test_communication_logged_in_receiver_context
-```
+- **`tool_loop.py`** — Added `bot` to `_CONTEXT_INJECTED_PARAMS`, `ToolExecutionContext`, `_execute_tool` injection; added `agent_comm` category mapping and action string builder.
+- **`bot.py`** — Added `spawn_agent_branch()` method (like `spawn_hook_branch` but `is_admin=False`); wired `bot=self` into `ToolExecutionContext`.
+- **`engine.py`** — Added `r"tool:agent_comm:.*"` to standard preset's allow list.
+- **`registry.py`** — Registered `send_to_agent`, `read_agent_docs`, `list_agents` with JSON schemas.
 
-## Implementation Notes
+### New file: `tests/test_agent/test_communication.py`
 
-1. **Module location:** `src/chorus/agent/communication.py` (new module) and new tools registered in the tool registry.
+6 test classes, 30 tests:
+- `TestSendToAgent` (6) — delivery, self-rejection, missing target, no bot, spawn called, spawn failure
+- `TestReadAgentDocs` (5) — content returned, self-rejection, missing agent, multiple files, empty docs
+- `TestListAgents` (4) — lists agents, excludes self, includes descriptions/model, empty dir
+- `TestExtractFirstParagraph` (7) — heading skip, italic skip, empty content, truncation, plain, bold skip, blockquote skip
+- `TestPermissionIntegration` (5) — tools registered, allowed in standard/open, category mapping, action strings
+- `TestToolExecution` (3) — end-to-end via `_execute_tool` for send, list, read_docs
 
-2. **send_to_agent implementation:**
-   ```python
-   async def send_to_agent(
-       source_agent: str,
-       target_agent: str,
-       message: str,
-       bot: ChorusBot,
-       profile: PermissionProfile,
-   ) -> CommResult:
-       action = format_action("agent_comm", f"send {target_agent}")
-       perm = check(action, profile)
-       # ... permission handling ...
-       target_channel = bot.get_agent_channel(target_agent)
-       await target_channel.send(f"**From {source_agent}:** {message}")
-       return CommResult(delivered=True, ...)
-   ```
+## What Was NOT Implemented (deferred)
 
-3. **Request/response pattern:** Use `asyncio.Event` or `asyncio.Queue` for response routing:
-   - Sending agent posts a message with a unique request ID.
-   - Target agent's response handler watches for messages that reference the request ID.
-   - On response, the event is set and the sending agent's `request_from_agent` call returns.
-   - On timeout, return a timeout error to the LLM so it can decide what to do.
-
-4. **Circular communication detection:** Maintain a call stack in each message. When agent A sends to agent B, the message includes `call_chain: ["A"]`. When B sends to A, it becomes `call_chain: ["A", "B"]`. If the chain length exceeds `max_depth`, reject the send with an error explaining the circular reference.
-
-5. **Agent discovery tool:** `list_agents()` reads all agent directories, extracts the first paragraph of each `docs/README.md`, and returns a list of `{name, description, model, status}`.
-
-6. **Use cases this enables:**
-   - A "project manager" agent delegates coding tasks to a "developer" agent.
-   - A "reviewer" agent requests changes from the author agent.
-   - A "research" agent gathers information and sends summaries to a "writing" agent.
-   - An "ops" agent detects an issue and asks a "debug" agent to investigate.
-
-7. **Message format in target channel:** Inter-agent messages should be visually distinct from user messages. Use an embed with a different color and a clear "From: <agent>" header.
-
-8. **This is a future phase.** Do not implement until TODOs 001-010 are complete and stable. The design here should be validated against real multi-agent workflows before building.
+- **`request_from_agent`** (blocking request/response) — deferred; fire-and-forget is sufficient for now.
+- **Circular communication detection** — deferred; not needed for fire-and-forget.
+- **Rate limiting** — deferred; can be added if message storms become a real problem.
 
 ## Dependencies
 
-- **001-010**: All core functionality must be complete and stable.
+- **001-010**: All core functionality (complete).

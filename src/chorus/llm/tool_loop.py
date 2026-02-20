@@ -37,7 +37,7 @@ _CONTEXT_INJECTED_PARAMS = frozenset({
     "workspace", "profile", "agent_name", "chorus_home",
     "is_admin", "db", "host_execution", "scope_path",
     "process_manager", "branch_id", "on_tool_progress",
-    "hook_dispatcher",
+    "hook_dispatcher", "bot",
 })
 
 logger = logging.getLogger("chorus.llm.tool_loop")
@@ -75,6 +75,9 @@ _TOOL_TO_CATEGORY: dict[str, str] = {
     "run_concurrent": "run_concurrent",
     "run_background": "run_background",
     "add_process_hooks": "add_process_hooks",
+    "send_to_agent": "agent_comm",
+    "read_agent_docs": "agent_comm",
+    "list_agents": "agent_comm",
 }
 
 
@@ -116,6 +119,13 @@ def _build_action_string(tool_name: str, arguments: dict[str, Any]) -> str:
         detail = arguments.get("command", str(arguments))
     elif category == "add_process_hooks":
         detail = str(arguments.get("pid", ""))
+    elif category == "agent_comm":
+        if tool_name == "send_to_agent":
+            detail = f"send {arguments.get('target_agent', '')}"
+        elif tool_name == "read_agent_docs":
+            detail = f"read_docs {arguments.get('target_agent', '')}"
+        else:
+            detail = "list"
     elif category == "web_search":
         detail = "enabled"
     else:
@@ -216,6 +226,7 @@ class ToolExecutionContext:
     hook_dispatcher: Any = None
     branch_id: int | None = None
     on_tool_progress: Any = None  # Callable[[dict], Any] | None
+    bot: Any = None  # ChorusBot — injected for inter-agent communication
 
 
 @dataclass
@@ -360,6 +371,8 @@ async def _execute_tool(
         kwargs["branch_id"] = ctx.branch_id
     if "on_tool_progress" in sig.parameters and "on_tool_progress" not in arguments:
         kwargs["on_tool_progress"] = ctx.on_tool_progress
+    if "bot" in sig.parameters and "bot" not in arguments:
+        kwargs["bot"] = ctx.bot
 
     result = await tool.handler(**kwargs)
 
